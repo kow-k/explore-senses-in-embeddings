@@ -1,0 +1,1072 @@
+#!/usr/bin/env python3
+"""
+SenseRepair: Sense Discovery and Disambiguation via Simulated Self-Repair
+==========================================================================
+
+A lightweight, training-free method for discovering and disambiguating
+word senses in static embeddings (GloVe, Word2Vec, FastText, etc.).
+
+Inspired by DNA self-repair mechanisms: noise + self-organization
+reveals latent sense structure encoded as stable attractors.
+
+Key Features:
+  - Zero training required
+  - Works with any static embeddings
+  - Automatic anchor discovery (no manual specification needed)
+  - Noise level as granularity control (semantic zoom)
+  - Stability-based sense number selection
+  - Sense-aware similarity metrics
+  - Context-based disambiguation
+  - Minimal computational cost
+
+Basic Usage:
+  >>> from sense_repair import SenseRepair
+  >>> sr = SenseRepair.from_glove("glove.6B.100d.txt")
+  >>> senses = sr.discover_senses("bank")
+  >>> print(senses)
+  {'financial': array([...]), 'river': array([...])}
+  >>> sr.similarity("bank", "money")  # sense-aware
+  0.827
+
+Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
+License: MIT
+Repository: https://github.com/kow-k/sense-repair
+"""
+
+__version__ = "0.2.0"
+__author__ = "Kow Kuroda & Claude"
+
+import numpy as np
+from numpy.linalg import norm
+from typing import Dict, List, Tuple, Optional, Union, Set
+from pathlib import Path
+from collections import defaultdict, Counter
+import warnings
+
+
+# =============================================================================
+# Core SenseRepair Class
+# =============================================================================
+
+class SenseRepair:
+    """
+    Discover and disambiguate word senses via simulated self-repair.
+    
+    The method works by:
+      1. Creating noisy copies of a word's embedding
+      2. Seeding subsets toward different sense directions
+      3. Allowing copies to self-organize (repair) toward stable configurations
+      4. Observing which "attractor basins" the copies settle into
+    
+    Key insight: Noise level acts as a granularity control parameter.
+      - Low noise (10-20%): Fine distinctions, may over-split
+      - Medium noise (30-50%): Standard sense-level distinctions
+      - High noise (60-80%): Coarse groupings
+    
+    The "true" sense count is found where it remains STABLE across noise levels.
+    
+    Example:
+        >>> sr = SenseRepair.from_glove("glove.6B.100d.txt")
+        >>> sr.discover_senses("bank")
+        {'financial': array([...]), 'river': array([...])}
+        >>> sr.similarity("bank", "river", sense_aware=True)
+        0.818
+    """
+    
+    def __init__(
+        self,
+        embeddings: Dict[str, np.ndarray],
+        dim: int = None,
+        default_n_senses: int = 2,
+        n_copies: int = 100,
+        noise_level: float = 0.5,
+        seed_strength: float = 0.3,
+        n_iterations: int = 15,
+        anchor_pull: float = 0.2,
+        n_anchors: int = 8,
+        verbose: bool = True
+    ):
+        """
+        Initialize SenseRepair with embeddings.
+        
+        Args:
+            embeddings: Dict mapping words to numpy vectors
+            dim: Embedding dimension (auto-detected if None)
+            default_n_senses: Default number of senses to discover
+            n_copies: Number of noisy copies for self-repair
+            noise_level: Noise magnitude (fraction of embedding values)
+                         Acts as granularity control: low=fine, high=coarse
+            seed_strength: Strength of initial seeding toward senses
+            n_iterations: Number of self-organization iterations
+            anchor_pull: Strength of pull toward anchor centroids
+            n_anchors: Number of anchors per sense for auto-discovery
+            verbose: Print progress messages
+        """
+        self.embeddings = embeddings
+        self.dim = dim or len(next(iter(embeddings.values())))
+        self.vocab = set(embeddings.keys())
+        self.vocab_size = len(self.vocab)
+        
+        # Self-repair parameters
+        self.default_n_senses = default_n_senses
+        self.n_copies = n_copies
+        self.noise_level = noise_level
+        self.seed_strength = seed_strength
+        self.n_iterations = n_iterations
+        self.anchor_pull = anchor_pull
+        self.n_anchors = n_anchors
+        self.verbose = verbose
+        
+        # Caches
+        self._sense_cache = {}  # word -> {sense_name: embedding}
+        self._anchor_cache = {}  # word -> {sense_name: [anchor_words]}
+        self._stability_cache = {}  # word -> stability analysis results
+        
+        # Precompute normalized embeddings for speed
+        self._embeddings_norm = {}
+        for word, emb in embeddings.items():
+            self._embeddings_norm[word] = emb / (norm(emb) + 1e-10)
+        
+        if verbose:
+            print(f"SenseRepair initialized with {self.vocab_size:,} words, dim={self.dim}")
+    
+    # =========================================================================
+    # Loading Methods
+    # =========================================================================
+    
+    @classmethod
+    def from_glove(cls, filepath: str, max_words: int = None, **kwargs) -> 'SenseRepair':
+        """
+        Load from GloVe format (text or binary).
+        
+        Args:
+            filepath: Path to GloVe file (.txt or .bin)
+            max_words: Maximum number of words to load
+            **kwargs: Additional arguments for SenseRepair
+        
+        Returns:
+            SenseRepair instance
+        """
+        embeddings, dim = cls._load_glove(filepath, max_words, kwargs.get('verbose', True))
+        return cls(embeddings, dim=dim, **kwargs)
+    
+    @classmethod
+    def from_word2vec(cls, filepath: str, max_words: int = None, binary: bool = True, **kwargs) -> 'SenseRepair':
+        """
+        Load from Word2Vec format.
+        
+        Args:
+            filepath: Path to Word2Vec file
+            max_words: Maximum number of words to load
+            binary: Whether file is binary format
+            **kwargs: Additional arguments for SenseRepair
+        
+        Returns:
+            SenseRepair instance
+        """
+        embeddings, dim = cls._load_word2vec(filepath, max_words, binary, kwargs.get('verbose', True))
+        return cls(embeddings, dim=dim, **kwargs)
+    
+    @classmethod
+    def from_dict(cls, embeddings: Dict[str, Union[np.ndarray, List[float]]], **kwargs) -> 'SenseRepair':
+        """
+        Create from dictionary of embeddings.
+        
+        Args:
+            embeddings: Dict mapping words to vectors (numpy arrays or lists)
+            **kwargs: Additional arguments for SenseRepair
+        
+        Returns:
+            SenseRepair instance
+        """
+        # Convert lists to numpy arrays if needed
+        emb_dict = {}
+        for word, vec in embeddings.items():
+            if isinstance(vec, list):
+                emb_dict[word] = np.array(vec, dtype=np.float32)
+            else:
+                emb_dict[word] = vec.astype(np.float32)
+        
+        return cls(emb_dict, **kwargs)
+    
+    @staticmethod
+    def _load_glove(filepath: str, max_words: int = None, verbose: bool = True) -> Tuple[Dict[str, np.ndarray], int]:
+        """Load GloVe embeddings from file."""
+        embeddings = {}
+        dim = None
+        
+        if verbose:
+            print(f"Loading embeddings from {filepath}...")
+        
+        filepath = Path(filepath)
+        
+        if filepath.suffix == '.bin':
+            # Binary format (gensim-style)
+            with open(filepath, 'rb') as f:
+                header = f.readline().decode('utf-8').strip()
+                vocab_size, dim = map(int, header.split())
+                
+                for _ in range(vocab_size):
+                    word_bytes = b''
+                    while True:
+                        c = f.read(1)
+                        if c == b' ' or c == b'':
+                            break
+                        word_bytes += c
+                    word = word_bytes.decode('utf-8', errors='replace')
+                    vec = np.frombuffer(f.read(dim * 4), dtype=np.float32).copy()
+                    embeddings[word] = vec
+                    
+                    if max_words and len(embeddings) >= max_words:
+                        break
+        else:
+            # Text format
+            with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 2:
+                        continue
+                    word = parts[0]
+                    try:
+                        vec = np.array([float(x) for x in parts[1:]], dtype=np.float32)
+                        embeddings[word] = vec
+                        if dim is None:
+                            dim = len(vec)
+                        if max_words and len(embeddings) >= max_words:
+                            break
+                    except ValueError:
+                        continue
+        
+        if verbose:
+            print(f"Loaded {len(embeddings):,} embeddings with dimension {dim}")
+        
+        return embeddings, dim
+    
+    @staticmethod
+    def _load_word2vec(filepath: str, max_words: int = None, binary: bool = True, verbose: bool = True) -> Tuple[Dict[str, np.ndarray], int]:
+        """Load Word2Vec embeddings from file."""
+        embeddings = {}
+        
+        if verbose:
+            print(f"Loading Word2Vec embeddings from {filepath}...")
+        
+        with open(filepath, 'rb') as f:
+            header = f.readline().decode('utf-8').strip()
+            vocab_size, dim = map(int, header.split())
+            
+            for _ in range(vocab_size):
+                word_bytes = b''
+                while True:
+                    c = f.read(1)
+                    if c == b' ':
+                        break
+                    if c == b'':
+                        break
+                    word_bytes += c
+                
+                word = word_bytes.decode('utf-8', errors='replace')
+                
+                if binary:
+                    vec = np.frombuffer(f.read(dim * 4), dtype=np.float32).copy()
+                else:
+                    vec = np.array([float(x) for x in f.readline().split()], dtype=np.float32)
+                
+                embeddings[word] = vec
+                
+                if max_words and len(embeddings) >= max_words:
+                    break
+        
+        if verbose:
+            print(f"Loaded {len(embeddings):,} embeddings with dimension {dim}")
+        
+        return embeddings, dim
+    
+    # =========================================================================
+    # Core Sense Discovery
+    # =========================================================================
+    
+    def discover_senses(
+        self,
+        word: str,
+        n_senses: int = None,
+        anchors: Dict[str, List[str]] = None,
+        noise_level: float = None,
+        force: bool = False
+    ) -> Dict[str, np.ndarray]:
+        """
+        Discover sense-specific embeddings for a word.
+        
+        Args:
+            word: Target word
+            n_senses: Number of senses to discover (default: auto or 2)
+            anchors: Optional dict of {sense_name: [anchor_words]}
+                     If None, anchors are discovered automatically
+            noise_level: Override default noise level (granularity control)
+            force: Force rediscovery even if cached
+        
+        Returns:
+            Dict mapping sense names to sense-specific embeddings
+        """
+        if word not in self.vocab:
+            raise ValueError(f"Word '{word}' not in vocabulary")
+        
+        # Check cache
+        if not force and word in self._sense_cache:
+            return self._sense_cache[word]
+        
+        n_senses = n_senses or self.default_n_senses
+        noise = noise_level if noise_level is not None else self.noise_level
+        
+        # Get or discover anchors
+        if anchors is None:
+            anchors = self._discover_anchors(word, n_senses)
+        
+        # Compute sense centroids from anchors
+        sense_centroids = self._compute_sense_centroids(anchors)
+        
+        if len(sense_centroids) < 2:
+            # Not enough senses found
+            emb = self._embeddings_norm[word]
+            self._sense_cache[word] = {'default': emb}
+            return {'default': emb}
+        
+        # Run simulated self-repair
+        sense_embs = self._simulated_repair(word, sense_centroids, noise)
+        
+        # Cache results
+        self._sense_cache[word] = sense_embs
+        self._anchor_cache[word] = anchors
+        
+        return sense_embs
+    
+    def discover_senses_stable(
+        self,
+        word: str,
+        n_senses: int = None,
+        anchors: Dict[str, List[str]] = None,
+        noise_levels: List[float] = None,
+        n_trials: int = 3
+    ) -> Dict:
+        """
+        Discover senses using stability-based method.
+        
+        This method runs sense discovery at multiple noise levels and
+        finds the STABLE sense count - the one that persists across
+        different granularities. This is more robust than single-noise
+        discovery.
+        
+        Args:
+            word: Target word
+            n_senses: Max number of senses to consider
+            anchors: Optional dict of {sense_name: [anchor_words]}
+            noise_levels: List of noise levels to test (default: 10%-70%)
+            n_trials: Number of trials per noise level
+        
+        Returns:
+            Dict with:
+                - 'senses': sense embeddings at optimal noise
+                - 'stable_k': stable sense count
+                - 'optimal_noise': best noise level
+                - 'confidence': stability confidence
+                - 'stable_range': (start, end) noise range
+        """
+        if word not in self.vocab:
+            raise ValueError(f"Word '{word}' not in vocabulary")
+        
+        if noise_levels is None:
+            noise_levels = [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7]
+        
+        n_senses = n_senses or 6  # Allow more senses for exploration
+        
+        # Get or discover anchors
+        if anchors is None:
+            anchors = self._discover_anchors(word, n_senses)
+        
+        sense_centroids = self._compute_sense_centroids(anchors)
+        
+        if len(sense_centroids) < 2:
+            return {
+                'senses': {'default': self._embeddings_norm[word]},
+                'stable_k': 1,
+                'optimal_noise': self.noise_level,
+                'confidence': 1.0,
+                'stable_range': None
+            }
+        
+        # Collect sense counts at each noise level
+        sense_counts = []
+        results_by_noise = {}
+        
+        for noise in noise_levels:
+            trial_counts = []
+            trial_results = []
+            
+            for _ in range(n_trials):
+                sense_embs = self._simulated_repair(word, sense_centroids, noise)
+                k = len(sense_embs)
+                trial_counts.append(k)
+                trial_results.append(sense_embs)
+            
+            # Use mode (most common count)
+            mode_count = Counter(trial_counts).most_common(1)[0][0]
+            sense_counts.append((noise, mode_count))
+            
+            # Store result with mode count
+            for embs in trial_results:
+                if len(embs) == mode_count:
+                    results_by_noise[noise] = embs
+                    break
+        
+        # Find longest stable run
+        best_run = None
+        best_length = 0
+        current_k = None
+        current_start = None
+        
+        for noise, k in sense_counts:
+            if k != current_k:
+                if current_k is not None and current_start is not None:
+                    length = noise - current_start
+                    if length > best_length:
+                        best_length = length
+                        best_run = (current_start, noise, current_k)
+                current_k = k
+                current_start = noise
+        
+        # Check final run
+        if current_k is not None and current_start is not None:
+            length = sense_counts[-1][0] - current_start + (noise_levels[1] - noise_levels[0])
+            if length > best_length:
+                best_length = length
+                best_run = (current_start, sense_counts[-1][0], current_k)
+        
+        if best_run is None:
+            # No stable run found, use most common count
+            all_counts = [k for _, k in sense_counts]
+            stable_k = Counter(all_counts).most_common(1)[0][0]
+            stable_range = None
+            confidence = 0.0
+            optimal_noise = self.noise_level
+        else:
+            stable_k = best_run[2]
+            stable_range = (best_run[0], best_run[1])
+            confidence = best_length / (noise_levels[-1] - noise_levels[0])
+            optimal_noise = (stable_range[0] + stable_range[1]) / 2
+        
+        # Get senses at optimal noise
+        if optimal_noise in results_by_noise:
+            final_senses = results_by_noise[optimal_noise]
+        else:
+            final_senses = self._simulated_repair(word, sense_centroids, optimal_noise)
+        
+        # Cache
+        self._sense_cache[word] = final_senses
+        self._stability_cache[word] = {
+            'stable_k': stable_k,
+            'optimal_noise': optimal_noise,
+            'confidence': confidence,
+            'stable_range': stable_range,
+            'sense_counts': sense_counts
+        }
+        
+        return {
+            'senses': final_senses,
+            'stable_k': stable_k,
+            'optimal_noise': optimal_noise,
+            'confidence': confidence,
+            'stable_range': stable_range
+        }
+    
+    def _discover_anchors(self, word: str, n_senses: int) -> Dict[str, List[str]]:
+        """
+        Automatically discover anchor words for each sense.
+        
+        Strategy:
+          1. Find k nearest neighbors of the target word
+          2. Cluster neighbors into n_senses groups
+          3. Use cluster members as anchors for each sense
+        """
+        target_emb = self._embeddings_norm[word]
+        
+        # Find nearest neighbors (excluding the word itself)
+        k_neighbors = min(100, self.vocab_size - 1)
+        
+        similarities = []
+        for w, emb in self._embeddings_norm.items():
+            if w == word:
+                continue
+            sim = np.dot(target_emb, emb)
+            similarities.append((w, sim, self.embeddings[w]))
+        
+        similarities.sort(key=lambda x: -x[1])
+        neighbors = similarities[:k_neighbors]
+        
+        neighbor_words = [n[0] for n in neighbors]
+        neighbor_vecs = np.array([n[2] for n in neighbors])
+        
+        # Normalize for clustering
+        norms = np.linalg.norm(neighbor_vecs, axis=1, keepdims=True) + 1e-10
+        neighbor_vecs_norm = neighbor_vecs / norms
+        
+        # K-means clustering
+        assignments, centroids = self._kmeans(neighbor_vecs_norm, n_senses)
+        
+        # Group neighbors by cluster
+        anchors = {}
+        for sense_idx in range(n_senses):
+            mask = assignments == sense_idx
+            cluster_words = [neighbor_words[i] for i in range(len(neighbor_words)) if mask[i]]
+            
+            if cluster_words:
+                # Use top n_anchors words from each cluster
+                anchors[f"sense_{sense_idx}"] = cluster_words[:self.n_anchors]
+        
+        return anchors
+    
+    def _compute_sense_centroids(self, anchors: Dict[str, List[str]]) -> Dict[str, np.ndarray]:
+        """Compute normalized centroid for each sense from anchor words."""
+        centroids = {}
+        
+        for sense_name, anchor_words in anchors.items():
+            anchor_vecs = [self.embeddings[w] for w in anchor_words if w in self.vocab]
+            if anchor_vecs:
+                centroid = np.mean(anchor_vecs, axis=0)
+                centroid = centroid / (norm(centroid) + 1e-10)
+                centroids[sense_name] = centroid
+        
+        return centroids
+    
+    def _simulated_repair(
+        self,
+        word: str,
+        sense_centroids: Dict[str, np.ndarray],
+        noise_level: float
+    ) -> Dict[str, np.ndarray]:
+        """
+        Run simulated self-repair to discover sense-specific embeddings.
+        
+        This is the core algorithm:
+          1. Create seeded noisy copies
+          2. Iteratively pull toward sense centroids
+          3. Average copies by final sense assignment
+        """
+        embedding = self.embeddings[word]
+        senses = list(sense_centroids.keys())
+        n_senses = len(senses)
+        copies_per_sense = self.n_copies // n_senses
+        
+        # Create seeded noisy copies
+        copies = []
+        
+        for sense in senses:
+            centroid = sense_centroids[sense]
+            for _ in range(copies_per_sense):
+                copy = embedding.copy()
+                
+                # Add noise
+                n_perturb = np.random.randint(int(self.dim * 0.5), int(self.dim * 0.8))
+                perturb_dims = np.random.choice(self.dim, n_perturb, replace=False)
+                for d in perturb_dims:
+                    copy[d] += np.random.randn() * abs(embedding[d]) * noise_level
+                
+                # Seed toward sense
+                copy_norm = copy / (norm(copy) + 1e-10)
+                direction = centroid - copy_norm
+                copy += self.seed_strength * direction * norm(copy)
+                
+                copies.append(copy)
+        
+        copies = np.array(copies)
+        centroid_matrix = np.array([sense_centroids[s] for s in senses])
+        
+        # Self-organization iterations
+        current_pull = self.anchor_pull
+        
+        for _ in range(self.n_iterations):
+            norms = np.linalg.norm(copies, axis=1, keepdims=True) + 1e-10
+            copies_norm = copies / norms
+            
+            # Assign to nearest sense
+            similarities = copies_norm @ centroid_matrix.T
+            assignments = np.argmax(similarities, axis=1)
+            
+            # Pull toward assigned sense centroid
+            for i in range(len(copies)):
+                target = centroid_matrix[assignments[i]]
+                direction = target - copies_norm[i]
+                copies[i] += current_pull * direction * norms[i, 0]
+            
+            current_pull *= 0.95  # Decay
+        
+        # Final assignment
+        norms = np.linalg.norm(copies, axis=1, keepdims=True) + 1e-10
+        copies_norm = copies / norms
+        similarities = copies_norm @ centroid_matrix.T
+        final_assignments = np.argmax(similarities, axis=1)
+        
+        # Average copies by sense (only if sufficient copies)
+        sense_embeddings = {}
+        min_copies = self.n_copies * 0.05  # At least 5% of copies
+        
+        for sense_idx, sense in enumerate(senses):
+            mask = final_assignments == sense_idx
+            if mask.sum() >= min_copies:
+                sense_emb = copies[mask].mean(axis=0)
+                sense_emb = sense_emb / (norm(sense_emb) + 1e-10)
+                sense_embeddings[sense] = sense_emb
+        
+        return sense_embeddings
+    
+    def _kmeans(self, vectors: np.ndarray, k: int, max_iter: int = 30) -> Tuple[np.ndarray, np.ndarray]:
+        """K-means clustering with k-means++ initialization."""
+        n, d = vectors.shape
+        
+        if n < k:
+            k = n
+        
+        # K-means++ initialization
+        centroids = np.zeros((k, d))
+        centroids[0] = vectors[np.random.randint(n)]
+        
+        for i in range(1, k):
+            dists = np.min([np.sum((vectors - centroids[j])**2, axis=1) 
+                            for j in range(i)], axis=0)
+            dists = np.maximum(dists, 1e-10)
+            probs = dists / dists.sum()
+            probs = probs / probs.sum()
+            centroids[i] = vectors[np.random.choice(n, p=probs)]
+        
+        assignments = np.zeros(n, dtype=int)
+        
+        for _ in range(max_iter):
+            distances = np.array([np.sum((vectors - centroids[j])**2, axis=1) for j in range(k)]).T
+            new_assignments = np.argmin(distances, axis=1)
+            
+            if np.all(new_assignments == assignments):
+                break
+            assignments = new_assignments
+            
+            for j in range(k):
+                mask = assignments == j
+                if mask.sum() > 0:
+                    centroids[j] = vectors[mask].mean(axis=0)
+        
+        return assignments, centroids
+    
+    # =========================================================================
+    # Similarity Methods
+    # =========================================================================
+    
+    def similarity(
+        self,
+        word1: str,
+        word2: str,
+        sense_aware: bool = True,
+        context: List[str] = None
+    ) -> float:
+        """
+        Compute similarity between two words.
+        
+        Args:
+            word1: First word
+            word2: Second word
+            sense_aware: If True, use sense-aware similarity
+            context: Optional context words for disambiguation
+        
+        Returns:
+            Cosine similarity score
+        """
+        if word1 not in self.vocab or word2 not in self.vocab:
+            return 0.0
+        
+        if not sense_aware:
+            return self._cosine(word1, word2)
+        
+        if context:
+            return self.context_similarity(word1, word2, context)[0]
+        else:
+            return self.max_sense_similarity(word1, word2)[0]
+    
+    def _cosine(self, word1: str, word2: str) -> float:
+        """Standard cosine similarity."""
+        return float(np.dot(self._embeddings_norm[word1], self._embeddings_norm[word2]))
+    
+    def max_sense_similarity(self, word1: str, word2: str) -> Tuple[float, str]:
+        """
+        Max-sense similarity: max_i sim(sense_i(w1), w2)
+        
+        Returns:
+            Tuple of (similarity, selected_sense_name)
+        """
+        senses1 = self.discover_senses(word1)
+        e2 = self._embeddings_norm[word2]
+        
+        best_sim = -1.0
+        best_sense = 'default'
+        
+        for sense_name, sense_emb in senses1.items():
+            sim = np.dot(sense_emb, e2)
+            if sim > best_sim:
+                best_sim = sim
+                best_sense = sense_name
+        
+        return float(best_sim), best_sense
+    
+    def best_match_similarity(self, word1: str, word2: str) -> Tuple[float, str, str]:
+        """
+        Best-match similarity for two potentially polysemous words.
+        
+        Returns:
+            Tuple of (similarity, word1_sense, word2_sense)
+        """
+        senses1 = self.discover_senses(word1)
+        senses2 = self.discover_senses(word2)
+        
+        best_sim = -1.0
+        best_s1 = 'default'
+        best_s2 = 'default'
+        
+        for s1_name, s1_emb in senses1.items():
+            for s2_name, s2_emb in senses2.items():
+                sim = np.dot(s1_emb, s2_emb)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_s1 = s1_name
+                    best_s2 = s2_name
+        
+        return float(best_sim), best_s1, best_s2
+    
+    def context_similarity(
+        self,
+        word1: str,
+        word2: str,
+        context: List[str]
+    ) -> Tuple[float, str, str]:
+        """
+        Context-disambiguated similarity.
+        
+        Args:
+            word1: First word
+            word2: Second word
+            context: Context words for disambiguation
+        
+        Returns:
+            Tuple of (similarity, word1_sense, word2_sense)
+        """
+        senses1 = self.discover_senses(word1)
+        senses2 = self.discover_senses(word2)
+        
+        # Compute context vector
+        context_vecs = [self._embeddings_norm[c] for c in context if c in self.vocab]
+        if not context_vecs:
+            return self.best_match_similarity(word1, word2)
+        
+        context_mean = np.mean(context_vecs, axis=0)
+        context_mean = context_mean / (norm(context_mean) + 1e-10)
+        
+        # Select senses aligned with context
+        best_s1 = max(senses1.items(), key=lambda x: np.dot(x[1], context_mean))[0]
+        best_s2 = max(senses2.items(), key=lambda x: np.dot(x[1], context_mean))[0]
+        
+        sim = np.dot(senses1[best_s1], senses2[best_s2])
+        
+        return float(sim), best_s1, best_s2
+    
+    # =========================================================================
+    # Analogy
+    # =========================================================================
+    
+    def analogy(
+        self,
+        a: str,
+        b: str,
+        c: str,
+        top_k: int = 10,
+        sense_aware: bool = True
+    ) -> List[Tuple[str, float]]:
+        """
+        Solve analogy: a:b :: c:?
+        
+        Args:
+            a, b, c: Analogy words
+            top_k: Number of results to return
+            sense_aware: If True, use sense-aware analogy
+        
+        Returns:
+            List of (word, score) tuples
+        """
+        if a not in self.vocab or b not in self.vocab or c not in self.vocab:
+            return []
+        
+        exclude = {a, b, c}
+        
+        if sense_aware:
+            senses_a = self.discover_senses(a)
+            senses_c = self.discover_senses(c)
+            e_b = self._embeddings_norm[b]
+            
+            # Find which sense of 'a' relates to 'b'
+            best_a_sense = max(senses_a.items(), key=lambda x: np.dot(x[1], e_b))[0]
+            e_a = senses_a[best_a_sense]
+            
+            # Use matching sense of 'c' if available
+            if best_a_sense in senses_c:
+                e_c = senses_c[best_a_sense]
+            else:
+                e_c = max(senses_c.items(), key=lambda x: np.dot(x[1], e_a))[1]
+        else:
+            e_a = self._embeddings_norm[a]
+            e_b = self._embeddings_norm[b]
+            e_c = self._embeddings_norm[c]
+        
+        # Compute analogy vector
+        analogy_vec = e_b - e_a + e_c
+        analogy_vec = analogy_vec / (norm(analogy_vec) + 1e-10)
+        
+        # Find nearest neighbors
+        results = []
+        for word, emb in self._embeddings_norm.items():
+            if word in exclude:
+                continue
+            score = np.dot(analogy_vec, emb)
+            results.append((word, float(score)))
+        
+        results.sort(key=lambda x: -x[1])
+        return results[:top_k]
+    
+    # =========================================================================
+    # Utility Methods
+    # =========================================================================
+    
+    def get_senses(self, word: str) -> List[str]:
+        """Get list of discovered sense names for a word."""
+        if word in self._sense_cache:
+            return list(self._sense_cache[word].keys())
+        return []
+    
+    def get_sense_embedding(self, word: str, sense: str) -> Optional[np.ndarray]:
+        """Get embedding for a specific sense of a word."""
+        if word in self._sense_cache and sense in self._sense_cache[word]:
+            return self._sense_cache[word][sense].copy()
+        return None
+    
+    def get_anchors(self, word: str) -> Optional[Dict[str, List[str]]]:
+        """Get anchor words used for each sense."""
+        return self._anchor_cache.get(word)
+    
+    def get_stability_info(self, word: str) -> Optional[Dict]:
+        """Get stability analysis results for a word."""
+        return self._stability_cache.get(word)
+    
+    def clear_cache(self):
+        """Clear all cached sense embeddings."""
+        self._sense_cache.clear()
+        self._anchor_cache.clear()
+        self._stability_cache.clear()
+    
+    def set_anchors(self, word: str, anchors: Dict[str, List[str]]):
+        """
+        Manually set anchors for a word (useful for known polysemous words).
+        
+        Example:
+            sr.set_anchors('bank', {
+                'financial': ['money', 'account', 'loan'],
+                'river': ['river', 'shore', 'water']
+            })
+        """
+        # Clear existing cache for this word
+        if word in self._sense_cache:
+            del self._sense_cache[word]
+        if word in self._stability_cache:
+            del self._stability_cache[word]
+        
+        # Discover senses with these anchors
+        self.discover_senses(word, anchors=anchors, force=True)
+    
+    def set_noise_level(self, noise_level: float):
+        """
+        Set the noise level (granularity control).
+        
+        Guidelines:
+            - 0.1-0.2: Fine-grained (may over-split)
+            - 0.3-0.5: Standard sense-level (recommended)
+            - 0.6-0.8: Coarse-grained
+        
+        Higher noise = coarser sense distinctions
+        """
+        self.noise_level = noise_level
+        # Clear cache since granularity changed
+        self.clear_cache()
+    
+    def __repr__(self) -> str:
+        return f"SenseRepair(vocab_size={self.vocab_size:,}, dim={self.dim}, cached_senses={len(self._sense_cache)})"
+
+
+# =============================================================================
+# Predefined Anchor Sets for Common Polysemous Words
+# =============================================================================
+
+COMMON_POLYSEMOUS = {
+    'bank': {
+        'financial': ['money', 'account', 'deposit', 'loan', 'finance', 'credit', 'savings', 'investment'],
+        'river': ['river', 'shore', 'water', 'stream', 'edge', 'slope', 'embankment', 'side']
+    },
+    'bat': {
+        'animal': ['bird', 'wing', 'fly', 'cave', 'mammal', 'nocturnal', 'vampire', 'creature'],
+        'sports': ['ball', 'hit', 'swing', 'baseball', 'cricket', 'wooden', 'player', 'game']
+    },
+    'cell': {
+        'biology': ['organism', 'membrane', 'nucleus', 'dna', 'protein', 'tissue', 'division', 'microscope'],
+        'prison': ['jail', 'prisoner', 'locked', 'bars', 'inmate', 'detention', 'solitary', 'confined'],
+        'phone': ['mobile', 'telephone', 'call', 'wireless', 'smartphone', 'signal', 'battery', 'tower']
+    },
+    'crane': {
+        'bird': ['bird', 'wing', 'fly', 'nest', 'feather', 'migrate', 'wetland', 'heron'],
+        'machine': ['construction', 'lift', 'heavy', 'tower', 'operator', 'load', 'steel', 'building']
+    },
+    'mouse': {
+        'animal': ['rat', 'rodent', 'cat', 'trap', 'cheese', 'squirrel', 'pet', 'tail'],
+        'computer': ['keyboard', 'click', 'cursor', 'screen', 'computer', 'button', 'pointer', 'device']
+    },
+    'plant': {
+        'vegetation': ['tree', 'flower', 'leaf', 'grow', 'seed', 'garden', 'root', 'soil'],
+        'factory': ['manufacturing', 'production', 'industrial', 'facility', 'equipment', 'machinery', 'worker', 'output']
+    },
+    'spring': {
+        'season': ['summer', 'winter', 'autumn', 'march', 'april', 'bloom', 'warm', 'flowers'],
+        'water': ['fountain', 'well', 'source', 'flow', 'natural', 'mineral', 'hot', 'fresh']
+    },
+    'bass': {
+        'fish': ['fish', 'fishing', 'lake', 'catch', 'trout', 'salmon', 'angler', 'pond'],
+        'music': ['guitar', 'music', 'band', 'drum', 'sound', 'instrument', 'player', 'rhythm']
+    },
+    'match': {
+        'fire': ['lighter', 'flame', 'burn', 'ignite', 'stick', 'sulfur', 'strike', 'box'],
+        'competition': ['game', 'tournament', 'opponent', 'winner', 'sports', 'contest', 'play', 'team']
+    },
+    'bow': {
+        'weapon': ['arrow', 'archer', 'shoot', 'hunting', 'string', 'target', 'quiver', 'crossbow'],
+        'gesture': ['curtsy', 'nod', 'greeting', 'respect', 'bend', 'head', 'polite', 'acknowledge']
+    }
+}
+
+
+def load_common_polysemous(sr: SenseRepair, words: List[str] = None):
+    """
+    Pre-load sense anchors for common polysemous words.
+    
+    Args:
+        sr: SenseRepair instance
+        words: List of words to load (default: all common polysemous)
+    """
+    words = words or list(COMMON_POLYSEMOUS.keys())
+    
+    for word in words:
+        if word in COMMON_POLYSEMOUS and word in sr.vocab:
+            sr.set_anchors(word, COMMON_POLYSEMOUS[word])
+
+
+# =============================================================================
+# Command-Line Interface
+# =============================================================================
+
+def main():
+    """Command-line interface for SenseRepair."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description='SenseRepair: Sense Discovery via Simulated Self-Repair',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Discover senses for a word
+  python -m sense_repair --glove glove.6B.100d.txt --word bank
+  
+  # Use stability-based discovery
+  python -m sense_repair --glove glove.6B.100d.txt --word bank --stable
+  
+  # Compute sense-aware similarity
+  python -m sense_repair --glove glove.6B.100d.txt --similarity bank river
+  
+  # Solve analogy
+  python -m sense_repair --glove glove.6B.100d.txt --analogy bank money crane
+  
+  # Control granularity with noise level
+  python -m sense_repair --glove glove.6B.100d.txt --word bank --noise 0.3
+        """
+    )
+    
+    parser.add_argument('--glove', type=str, help='Path to GloVe embeddings')
+    parser.add_argument('--word2vec', type=str, help='Path to Word2Vec embeddings')
+    parser.add_argument('--max-words', type=int, default=50000, help='Max words to load')
+    parser.add_argument('--word', type=str, help='Word to discover senses for')
+    parser.add_argument('--similarity', nargs=2, metavar=('W1', 'W2'), help='Compute similarity')
+    parser.add_argument('--analogy', nargs=3, metavar=('A', 'B', 'C'), help='Solve analogy a:b::c:?')
+    parser.add_argument('--n-senses', type=int, default=2, help='Number of senses to discover')
+    parser.add_argument('--noise', type=float, default=0.5, help='Noise level (granularity control)')
+    parser.add_argument('--stable', action='store_true', help='Use stability-based sense discovery')
+    parser.add_argument('--use-predefined', action='store_true', help='Use predefined anchors for common words')
+    
+    args = parser.parse_args()
+    
+    # Load embeddings
+    if args.glove:
+        sr = SenseRepair.from_glove(args.glove, max_words=args.max_words, noise_level=args.noise)
+    elif args.word2vec:
+        sr = SenseRepair.from_word2vec(args.word2vec, max_words=args.max_words, noise_level=args.noise)
+    else:
+        parser.error("Must specify --glove or --word2vec")
+    
+    # Load predefined anchors
+    if args.use_predefined:
+        load_common_polysemous(sr)
+    
+    # Discover senses
+    if args.word:
+        print(f"\nDiscovering senses for '{args.word}'...")
+        
+        if args.stable:
+            result = sr.discover_senses_stable(args.word, n_senses=args.n_senses)
+            print(f"Stable sense count: {result['stable_k']}")
+            print(f"Confidence: {result['confidence']:.1%}")
+            print(f"Optimal noise: {result['optimal_noise']:.1%}")
+            if result['stable_range']:
+                print(f"Stable range: {result['stable_range'][0]:.0%}-{result['stable_range'][1]:.0%}")
+            senses = result['senses']
+        else:
+            senses = sr.discover_senses(args.word, n_senses=args.n_senses)
+        
+        print(f"Found {len(senses)} senses: {list(senses.keys())}")
+        
+        anchors = sr.get_anchors(args.word)
+        if anchors:
+            print("\nAnchors used:")
+            for sense, words in anchors.items():
+                print(f"  {sense}: {', '.join(words[:5])}")
+    
+    # Compute similarity
+    if args.similarity:
+        w1, w2 = args.similarity
+        
+        std_sim = sr.similarity(w1, w2, sense_aware=False)
+        max_sim, sense = sr.max_sense_similarity(w1, w2)
+        
+        print(f"\nSimilarity between '{w1}' and '{w2}':")
+        print(f"  Standard:    {std_sim:.4f}")
+        print(f"  Sense-aware: {max_sim:.4f} (using {sense} sense)")
+        print(f"  Improvement: {max_sim - std_sim:+.4f}")
+    
+    # Solve analogy
+    if args.analogy:
+        a, b, c = args.analogy
+        
+        print(f"\nAnalogy: {a} : {b} :: {c} : ?")
+        
+        results = sr.analogy(a, b, c, top_k=5, sense_aware=True)
+        print("Top answers (sense-aware):")
+        for word, score in results:
+            print(f"  {word}: {score:.4f}")
+
+
+if __name__ == "__main__":
+    main()
