@@ -17,7 +17,7 @@ A lightweight, training-free framework for exploring word sense structure in sta
 | **Sense Induction** | `induce_senses()` | Weakly supervised | 88% |
 | **Polarity Classification** | `get_polarity()` | Supervised | 97% |
 
-**Key insight**: 
+**Key insight**:
 - Senses can be **discovered** (from data alone) or **induced** (anchor-guided)
 - **Semantic categories** self-organize; **polarity** within categories requires supervision
 - **X-means** automatically determines optimal sense count (no n_senses needed!)
@@ -171,7 +171,7 @@ polarity = se.get_polarity("terrible")
 Fully Unsupervised    Weakly Supervised    Fully Supervised
        │                     │                    │
   discover_senses()    induce_senses()     get_polarity()
-  discover_senses_auto()                        
+  discover_senses_auto()
        │                     │                    │
    No targets          Anchor targets        Seed labels
    56% accuracy        88% accuracy          97% accuracy
@@ -240,8 +240,8 @@ pf.evaluate_accuracy(pos, neg)  # Test accuracy
 
 ```bibtex
 @article{kuroda2026sense,
-  title={From Sense Discovery to Sense Induction via Simulated Self-Repair: 
-         Revealing Latent Semantic Attractors in Word Embeddings},
+  title={From sense mining to sense induction via simulated self-repair:
+         Revealing latent semantic attractors in word embeddings},
   author={Kuroda, Kow and Claude},
   journal={arXiv preprint},
   year={2026}
