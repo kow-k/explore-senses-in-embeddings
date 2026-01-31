@@ -182,7 +182,7 @@ cython_debug/
 
 ## personal
 .DS_Store
-*/.DS_Store
+*.DS_Store
 outdated/
 *.zip
 *.txt
