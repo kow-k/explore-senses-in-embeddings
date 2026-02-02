@@ -5,10 +5,9 @@ SenseExplorer: From Sense Discovery to Sense Induction via Simulated Self-Repair
 A lightweight, training-free framework for exploring word sense structure
 in static embeddings using biologically-inspired self-repair.
 
-Key insight: The self-repair algorithm is attractor-following, not 
-space-sampling. Anchor centroids define deterministic attractors—success
-depends on anchor quality, not the number of noisy copies (N). Even N=3
-achieves perfect separation when anchors are good.
+Key insight: Meanings behave like superposed waves. Spectral clustering
+(eigenvector decomposition) outperforms statistical clustering (BIC),
+confirming the wave-like nature of semantic representations.
 
 Three capabilities:
   - discover_senses(): Unsupervised - spectral clustering (90% at 50d)
@@ -30,7 +29,7 @@ Basic Usage:
 
 Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
 License: MIT
-Version: 0.8.0
+Version: 0.7.0
 """
 
 from .core import (
@@ -63,7 +62,7 @@ from .spectral import (
     find_k_by_eigengap
 )
 
-__version__ = "0.8.0"
+__version__ = "0.7.0"
 __author__ = "Kow Kuroda & Claude"
 __all__ = [
     # Core

@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.7.0-green.svg)](https://github.com/kow-k/sense-explorer)
+[![Version](https://img.shields.io/badge/version-0.8.0-green.svg)](https://github.com/kow-k/sense-explorer)
 
 A lightweight, training-free framework for exploring word sense structure in static embeddings (GloVe, Word2Vec, FastText).
 
@@ -15,6 +15,14 @@ Word senses are **superposed like waves** in embedding space. This is validated 
 - 90% vs 64% accuracy at 50d — the advantage is strongest where aliasing is worst
 - The eigengap criterion answers "how many senses?" like spectral analysis answers "how many frequencies?"
 
+## Key Insight: Self-Repair is Attractor-Following
+
+The self-repair algorithm does not sample the embedding space—it **follows attractors** defined by anchor centroids. This means:
+- **Anchor quality determines correctness**, not the number of noisy copies (N)
+- N=20–50 suffices regardless of embedding dimensionality (100d, 300d, 1024d)
+- Random anchors yield separated but **semantically wrong** senses (100% separation, 6.4% alignment)
+- Good anchors yield both separation **and** correctness (100% separation, 99.9% alignment)
+
 ## Three Capabilities
 
 | Capability | Method | Supervision | Accuracy |
@@ -24,11 +32,12 @@ Word senses are **superposed like waves** in embedding space. This is validated 
 | **Sense Induction** | `induce_senses()` | Weakly supervised | 88% |
 | **Polarity Classification** | `get_polarity()` | Supervised | 97% |
 
-**What's new in v0.7.0**:
-- **Spectral clustering** is now the default method (eigengap-based k selection)
-- Dramatically improved unsupervised discovery: 90% vs 64% (X-means) at 50d
-- New `clustering_method` parameter: `'spectral'` (default), `'xmeans'`, `'kmeans'`
-- Configurable `top_k` parameter for neighbor count (default: 50)
+**What's new in v0.8.0**:
+- **Attractor-following insight**: Anchor quality, not N, determines sense correctness
+- **Anchor validation** (`_validate_anchors()`): Warns before bad anchors silently produce wrong senses
+- **n_copies default reduced** from 100 → 30 (~70% computation savings, no accuracy loss)
+- **Vectorized self-repair**: Fully NumPy-vectorized noise generation and iteration loops
+- **Standalone quality assessment** (`assess_quality()`): Check anchor quality before induction
 
 ## Installation
 
@@ -54,7 +63,7 @@ from sense_explorer import SenseExplorer
 
 # Load embeddings (spectral clustering is now default!)
 se = SenseExplorer.from_glove("glove.6B.100d.txt")
-# Output: SenseExplorer v0.7.0 initialized with 400,000 words, dim=100
+# Output: SenseExplorer v0.8.0 initialized with 400,000 words, dim=100
 #         Clustering method: spectral (top_k=50)
 
 # UNSUPERVISED: Sense discovery with spectral clustering
@@ -174,6 +183,7 @@ Knowledge-guided sense induction:
 - Senses induced toward anchor-defined targets
 - Meaningful sense names (`financial`, `river`, ...)
 - ~88% accuracy
+- **NEW**: Automatic anchor validation warns about low-quality anchors
 
 ```python
 senses = se.induce_senses("bank")
@@ -183,6 +193,20 @@ senses = se.induce_senses("bank", anchors={
     "financial": ["money", "account", "loan"],
     "river": ["water", "shore", "stream"]
 })
+
+# Check anchor quality before induction
+quality = se._validate_anchors("bank", {
+    "financial": ["money", "account", "loan"],
+    "river": ["water", "shore", "stream"]
+})
+# Returns per-sense coherence, separation, relevance, and quality rating
+
+# Standalone quality assessment (without full SenseExplorer)
+from sense_explorer import HybridAnchorExtractor
+extractor = HybridAnchorExtractor(vocab)
+anchors, source = extractor.extract("bank")
+report = extractor.assess_quality("bank", anchors, embeddings_norm=emb_norm)
+print(report['overall'])  # 'good', 'fair', or 'poor'
 ```
 
 ### 3. Supervised Polarity (`get_polarity`)
@@ -237,6 +261,19 @@ Both sense discovery and induction use the same mechanism:
 2. **Repair** (self-organization): Settle into stable configurations
 3. **Diagnosis** (attractor identification): Observe attractor basins
 
+Critically, the algorithm is **attractor-following**, not space-sampling. Anchor centroids define deterministic attractors, and seeded copies converge to those attractors regardless of how many copies (N) are created. This explains why:
+
+```
+N (copies)       → Only reduces variance; even N=3 achieves 100% separation
+d (dimensionality) → Does not affect required N; the same N works for 100d and 1024d
+Anchor quality    → THE critical factor; determines whether attractors are correct
+```
+
+| Anchor Type | Separation | True Alignment | Explanation |
+|-------------|-----------|----------------|-------------|
+| Curated     | 100%      | 99.9%          | Correct attractors → correct senses |
+| Random      | 100%      | 6.4%           | Arbitrary attractors → wrong senses |
+
 ## API Reference
 
 ### SenseExplorer
@@ -246,13 +283,16 @@ SenseExplorer(
     embeddings,                    # Dict[str, np.ndarray]
     dim=None,                      # Auto-detected
     default_n_senses=2,            # Default sense count
+    n_copies=30,                   # Noisy copies (reduced from 100; see below)
     noise_level=0.5,               # Granularity control (0.1-0.8)
-    top_k=50,                      # Neighbors for clustering (NEW)
-    clustering_method='spectral',  # 'spectral', 'xmeans', 'kmeans' (NEW)
+    top_k=50,                      # Neighbors for clustering
+    clustering_method='spectral',  # 'spectral', 'xmeans', 'kmeans'
     use_hybrid_anchors=True,       # Enable hybrid extraction for induction
     verbose=True
 )
 ```
+
+**Why n_copies=30?** The self-repair algorithm is attractor-following: anchor centroids define the targets, and copies converge regardless of N. Our experiments show N=3 achieves 100% separation across all noise levels and dimensionalities. N=30 provides comfortable variance reduction with ~70% less computation than the previous default of 100.
 
 ### Key Methods
 
@@ -261,6 +301,7 @@ SenseExplorer(
 | `discover_senses(word, n_senses)` | Unsupervised | Sense discovery (spectral default) |
 | `discover_senses_auto(word)` | Unsupervised | Parameter-free discovery (eigengap) |
 | `induce_senses(word)` | Weakly supervised | Anchor-guided induction |
+| `_validate_anchors(word, anchors)` | Diagnostic | Check anchor quality before induction |
 | `explore_senses(word, mode)` | Auto | Convenience wrapper |
 | `get_polarity(word)` | Supervised | Polarity classification |
 | `classify_polarity(words)` | Supervised | Batch polarity |
@@ -280,6 +321,22 @@ labels, k = spectral_clustering(vectors, k=None, min_k=2, max_k=5)
 k = find_k_by_eigengap(eigenvalues, min_k=2, max_k=5)
 ```
 
+### HybridAnchorExtractor
+
+```python
+from sense_explorer import HybridAnchorExtractor
+
+extractor = HybridAnchorExtractor(vocab)
+anchors, source = extractor.extract("bank")       # Extract anchors (manual → FrameNet → WordNet)
+quality = extractor.assess_quality(                # Standalone quality check
+    "bank", anchors,
+    embeddings_norm=emb_norm                       # Optional: enables coherence/separation metrics
+)
+print(quality['overall'])                          # 'good', 'fair', or 'poor'
+print(quality['senses']['financial']['coherence']) # Intra-sense agreement
+print(quality['warnings'])                         # Any issues found
+```
+
 ### PolarityFinder
 
 ```python
@@ -296,6 +353,7 @@ pf.evaluate_accuracy(pos, neg)  # Test accuracy
 
 ## Version History
 
+- **v0.8.0**: Attractor-following insight, anchor validation, n_copies 100→30, vectorized self-repair, `assess_quality()`
 - **v0.7.0**: Spectral clustering default (90% at 50d), eigengap k selection, `clustering_method` parameter
 - **v0.6.0**: X-means for auto k, sense-loyal induction fix, dimensional recovery experiments
 - **v0.5.0**: Polarity classification (97% accuracy), domain-specific seeds

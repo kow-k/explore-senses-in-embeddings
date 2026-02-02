@@ -34,7 +34,7 @@ License: MIT
 Repository: https://github.com/kow-k/sense-explorer
 """
 
-__version__ = "0.8.0"
+__version__ = "0.7.0"
 __author__ = "Kow Kuroda & Claude"
 
 import numpy as np
@@ -91,13 +91,6 @@ class SenseExplorer:
       3. Allowing copies to self-organize toward stable configurations
       4. Observing which "attractor basins" the copies settle into
     
-    The algorithm is attractor-following, not space-sampling: anchor centroids
-    define deterministic attractors, and seeded copies converge to those
-    attractors regardless of dimensionality. This means:
-      - N (n_copies) can be low (20-50) even for high-dimensional embeddings
-      - Anchor quality determines correctness; N only reduces variance
-      - Random or poor anchors yield separated but semantically wrong senses
-    
     Noise level acts as a granularity control parameter:
       - Low noise (10-20%): Fine distinctions, may over-split
       - Medium noise (30-50%): Standard sense-level distinctions  
@@ -120,7 +113,7 @@ class SenseExplorer:
         embeddings: Dict[str, np.ndarray],
         dim: int = None,
         default_n_senses: int = 2,
-        n_copies: int = 30,
+        n_copies: int = 100,
         noise_level: float = 0.5,
         seed_strength: float = 0.3,
         n_iterations: int = 15,
@@ -138,11 +131,7 @@ class SenseExplorer:
             embeddings: Dict mapping words to numpy vectors
             dim: Embedding dimension (auto-detected if None)
             default_n_senses: Default number of senses to discover
-            n_copies: Number of noisy copies for self-repair (default: 30).
-                         The algorithm is attractor-following, not space-sampling:
-                         copies converge to sense attractors defined by anchor
-                         centroids. N=20-50 is sufficient regardless of embedding
-                         dimensionality. Anchor quality matters far more than N.
+            n_copies: Number of noisy copies for self-repair
             noise_level: Noise magnitude (fraction of embedding values)
                          Acts as granularity control: low=fine, high=coarse
             seed_strength: Strength of initial seeding toward senses
@@ -494,9 +483,6 @@ class SenseExplorer:
         if anchors is None:
             anchors = self._extract_anchors_hybrid(word, n_senses)
         
-        # Validate anchor quality (warns if poor)
-        anchor_quality = self._validate_anchors(word, anchors, warn=self.verbose)
-        
         sense_centroids = self._compute_sense_centroids(anchors)
         
         if len(sense_centroids) < 2:
@@ -508,13 +494,9 @@ class SenseExplorer:
         
         self._sense_cache[cache_key] = sense_embs
         self._anchor_cache[cache_key] = anchors
-        self._anchor_quality_cache = getattr(self, '_anchor_quality_cache', {})
-        self._anchor_quality_cache[cache_key] = anchor_quality
         
         if self.verbose:
-            quality_summary = {s: info['quality'] for s, info in anchor_quality.items()}
             print(f"  [WEAKLY SUPERVISED] Induced {len(sense_embs)} senses for '{word}'")
-            print(f"  Anchor quality: {quality_summary}")
         
         return sense_embs
     
@@ -975,129 +957,6 @@ class SenseExplorer:
         
         return sense_embs
     
-    def _validate_anchors(
-        self,
-        word: str,
-        anchors: Dict[str, List[str]],
-        warn: bool = True
-    ) -> Dict[str, dict]:
-        """
-        Validate anchor quality before self-repair.
-        
-        Performs three checks critical for sense induction correctness:
-          1. Intra-sense coherence: anchors within a sense should agree
-          2. Inter-sense separation: different senses should point apart
-          3. Target relevance: anchors should relate to the target word
-        
-        Without validation, bad anchors silently produce separated but
-        semantically wrong senses (our experiments show 100% separation
-        but only 6.4% true alignment with random anchors).
-        
-        Args:
-            word: Target word being disambiguated
-            anchors: Dict of {sense_name: [anchor_words]}
-            warn: If True, emit warnings for low-quality anchors
-        
-        Returns:
-            Dict of {sense_name: {
-                'coherence': float,   # Mean pairwise cosine within sense (0-1)
-                'separation': float,  # Min cosine distance to other sense centroids
-                'relevance': float,   # Mean cosine similarity to target word
-                'quality': str,       # 'good', 'fair', or 'poor'
-                'n_valid': int        # Number of anchors found in vocabulary
-            }}
-        """
-        if word not in self.vocab:
-            return {}
-        
-        target_vec = self._embeddings_norm[word]
-        
-        # Compute centroids and anchor vectors per sense
-        sense_info = {}
-        sense_centroids = {}
-        
-        for sense_name, anchor_words in anchors.items():
-            valid_words = [w for w in anchor_words if w in self.vocab]
-            if not valid_words:
-                sense_info[sense_name] = {
-                    'coherence': 0.0, 'separation': 0.0, 'relevance': 0.0,
-                    'quality': 'poor', 'n_valid': 0
-                }
-                continue
-            
-            vecs = np.array([self._embeddings_norm[w] for w in valid_words])
-            centroid = vecs.mean(axis=0)
-            centroid = centroid / (norm(centroid) + 1e-10)
-            sense_centroids[sense_name] = centroid
-            
-            # 1. Intra-sense coherence: mean pairwise cosine
-            if len(vecs) > 1:
-                sim_matrix = vecs @ vecs.T
-                n = len(vecs)
-                # Extract upper triangle (exclude diagonal)
-                mask = np.triu(np.ones((n, n), dtype=bool), k=1)
-                coherence = float(sim_matrix[mask].mean())
-            else:
-                coherence = 1.0  # Single anchor is trivially coherent
-            
-            # 3. Target relevance: mean cosine to target word
-            relevance = float((vecs @ target_vec).mean())
-            
-            sense_info[sense_name] = {
-                'coherence': coherence,
-                'separation': 0.0,  # Computed after all centroids are built
-                'relevance': relevance,
-                'quality': 'pending',
-                'n_valid': len(valid_words)
-            }
-        
-        # 2. Inter-sense separation: min cosine distance between centroid pairs
-        sense_names = [s for s in sense_centroids]
-        for i, s1 in enumerate(sense_names):
-            min_sep = 1.0
-            for j, s2 in enumerate(sense_names):
-                if i != j:
-                    cos_sim = float(sense_centroids[s1] @ sense_centroids[s2])
-                    distance = 1.0 - cos_sim
-                    min_sep = min(min_sep, distance)
-            sense_info[s1]['separation'] = min_sep if len(sense_names) > 1 else 0.0
-        
-        # Assign quality labels
-        for sense_name, info in sense_info.items():
-            if info['n_valid'] == 0:
-                info['quality'] = 'poor'
-            elif info['coherence'] >= 0.3 and info['relevance'] >= 0.2:
-                if len(sense_names) <= 1 or info['separation'] >= 0.1:
-                    info['quality'] = 'good'
-                else:
-                    info['quality'] = 'fair'
-            elif info['coherence'] >= 0.15 or info['relevance'] >= 0.1:
-                info['quality'] = 'fair'
-            else:
-                info['quality'] = 'poor'
-        
-        # Emit warnings
-        if warn:
-            poor_senses = [s for s, info in sense_info.items() if info['quality'] == 'poor']
-            if poor_senses:
-                warnings.warn(
-                    f"Low-quality anchors for '{word}' senses: {poor_senses}. "
-                    f"Anchor quality determines sense correctness—consider providing "
-                    f"better anchor words. (See _validate_anchors() output for details.)"
-                )
-            
-            # Check for overlapping senses
-            for i, s1 in enumerate(sense_names):
-                for j, s2 in enumerate(sense_names):
-                    if i < j and sense_info[s1]['separation'] < 0.05:
-                        warnings.warn(
-                            f"Senses '{s1}' and '{s2}' have nearly identical anchors "
-                            f"(separation={sense_info[s1]['separation']:.3f}). "
-                            f"They may collapse to the same sense."
-                        )
-        
-        return sense_info
-    
     def _compute_sense_centroids(self, anchors: Dict[str, List[str]]) -> Dict[str, np.ndarray]:
         """Compute normalized centroid for each sense from anchor words."""
         centroids = {}
@@ -1121,19 +980,10 @@ class SenseExplorer:
         """
         Run simulated self-repair to discover sense-specific embeddings.
         
-        This is the core algorithm (attractor-following):
+        This is the core algorithm:
           1. Create seeded noisy copies (each copy is seeded toward a specific sense)
-          2. Iteratively pull copies toward sense centroids (attractors)
+          2. Iteratively pull copies toward sense centroids
           3. Average copies by sense assignment
-        
-        The algorithm converges because anchor centroids define deterministic
-        attractors in embedding space. Seeding ensures copies start in the
-        correct attractor basin, and iterative pull follows the gradient to
-        the attractor. N (copies per sense) only reduces variance around the
-        attractor—even N=1 would converge to approximately the right location.
-        
-        CRITICAL: Success depends on anchor quality, not N. Good anchors yield
-        correct attractors; random anchors yield separated but wrong senses.
         
         Args:
             word: Target word
@@ -1150,33 +1000,35 @@ class SenseExplorer:
         senses = list(sense_centroids.keys())
         n_senses = len(senses)
         copies_per_sense = self.n_copies // n_senses
-        total_copies = copies_per_sense * n_senses
         
-        # Create seeded noisy copies (vectorized)
-        # Tile embedding for all copies at once
-        copies = np.tile(embedding, (total_copies, 1))
-        copy_sense_ids = np.repeat(np.arange(n_senses), copies_per_sense)
+        # Create seeded noisy copies
+        copies = []
+        copy_sense_ids = []  # Track which sense each copy was seeded toward
+        
+        for sense_idx, sense in enumerate(senses):
+            centroid = sense_centroids[sense]
+            for _ in range(copies_per_sense):
+                copy = embedding.copy()
+                
+                # Add noise
+                n_perturb = np.random.randint(int(self.dim * 0.5), int(self.dim * 0.8))
+                perturb_dims = np.random.choice(self.dim, n_perturb, replace=False)
+                for d in perturb_dims:
+                    copy[d] += np.random.randn() * abs(embedding[d]) * noise_level
+                
+                # Seed toward sense
+                copy_norm = copy / (norm(copy) + 1e-10)
+                direction = centroid - copy_norm
+                copy += self.seed_strength * direction * norm(copy)
+                
+                copies.append(copy)
+                copy_sense_ids.append(sense_idx)
+        
+        copies = np.array(copies)
+        copy_sense_ids = np.array(copy_sense_ids)
         centroid_matrix = np.array([sense_centroids[s] for s in senses])
         
-        # Vectorized noise: generate mask and noise for all copies at once
-        # Each copy perturbs 50-80% of dimensions
-        n_perturb_min = int(self.dim * 0.5)
-        n_perturb_max = int(self.dim * 0.8)
-        noise_matrix = np.random.randn(total_copies, self.dim) * np.abs(embedding) * noise_level
-        # Create random binary mask: each copy gets ~65% of dims perturbed
-        mask_probs = np.random.uniform(0, 1, (total_copies, self.dim))
-        frac = np.random.uniform(0.5, 0.8, (total_copies, 1))  # per-copy fraction
-        noise_mask = (mask_probs < frac).astype(np.float32)
-        copies += noise_matrix * noise_mask
-        
-        # Vectorized seeding toward sense centroids
-        copy_norms = np.linalg.norm(copies, axis=1, keepdims=True) + 1e-10
-        copies_normed = copies / copy_norms
-        targets = centroid_matrix[copy_sense_ids]  # (total_copies, dim)
-        directions = targets - copies_normed
-        copies += self.seed_strength * directions * copy_norms
-        
-        # Self-organization iterations (fully vectorized)
+        # Self-organization iterations
         current_pull = self.anchor_pull
         
         for _ in range(self.n_iterations):
@@ -1184,17 +1036,20 @@ class SenseExplorer:
             copies_norm = copies / norms
             
             if sense_loyal:
-                # SENSE-LOYAL: Pull toward SEEDED sense (vectorized)
-                targets = centroid_matrix[copy_sense_ids]
-                directions = targets - copies_norm
-                copies += current_pull * directions * norms
+                # SENSE-LOYAL: Pull toward SEEDED sense (for induction)
+                for i in range(len(copies)):
+                    target = centroid_matrix[copy_sense_ids[i]]
+                    direction = target - copies_norm[i]
+                    copies[i] += current_pull * direction * norms[i, 0]
             else:
-                # COMPETITIVE: Pull toward NEAREST sense (vectorized)
+                # COMPETITIVE: Pull toward NEAREST sense (for discovery)
                 similarities = copies_norm @ centroid_matrix.T
                 assignments = np.argmax(similarities, axis=1)
-                targets = centroid_matrix[assignments]
-                directions = targets - copies_norm
-                copies += current_pull * directions * norms
+                
+                for i in range(len(copies)):
+                    target = centroid_matrix[assignments[i]]
+                    direction = target - copies_norm[i]
+                    copies[i] += current_pull * direction * norms[i, 0]
             
             current_pull *= 0.95  # Decay
         
