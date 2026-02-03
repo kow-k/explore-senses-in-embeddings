@@ -464,8 +464,7 @@ plot_angle_summary([decomp1, decomp2, decomp3], "angles.png")
 
 ```bibtex
 @article{kuroda2026sense,
-  title={From sense mining to sense induction via simulated self-repair:
-         Revealing latent semantic attractors in word embeddings},
+  title={Sese separation: From sense mining to sense induction via simulated self-repair over word embeddings},
   author={Kuroda, Kow and Claude},
   journal={arXiv preprint},
   year={2026}
