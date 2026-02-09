@@ -9,32 +9,37 @@ in static embeddings (GloVe, Word2Vec, FastText, etc.).
 Inspired by DNA self-repair mechanisms: noise + self-organization
 reveals latent sense structure encoded as stable attractors.
 
-Two operational modes:
-  - discover_senses(): UNSUPERVISED - true sense discovery from data alone (56%)
-  - induce_senses():   WEAKLY SUPERVISED - anchor-guided induction (88%)
+Four operational modes on the supervision continuum:
+  - discover_senses_auto(): UNSUPERVISED - geometry decides k and content
+  - discover_senses():      SEMI-SUPERVISED - geometry decides content, user decides k
+  - separate_senses_wordnet(): WORDNET-GUIDED - lexicographic guidance + geometric filtering
+  - induce_senses():        WEAKLY SUPERVISED - anchor-guided induction (88%)
 
 The key insight: Senses can be DISCOVERED (emerging from distributional
-structure) or INDUCED (guided toward anchor-defined targets). Both use
-the same self-repair mechanism, but differ in supervision level.
+structure), SEPARATED under lexicographic guidance (WordNet synsets as
+structural hints), or INDUCED (guided toward anchor-defined targets).
+All use the same self-repair mechanism but differ in supervision level.
 
 Basic Usage:
   >>> from sense_explorer import SenseExplorer
-  >>> se = SenseExplorer.from_glove("glove.6B.100d.txt")
+  >>> se = SenseExplorer.from_glove("glove.6B.300d.txt")
   
   # Unsupervised discovery
-  >>> senses = se.discover_senses("bank", n_senses=2)
-  >>> print(senses.keys())  # dict_keys(['sense_0', 'sense_1'])
+  >>> senses = se.discover_senses_auto("bank")
+  
+  # WordNet-guided separation
+  >>> senses = se.separate_senses_wordnet("bank")
+  >>> print(senses.keys())  # Synset names as keys
   
   # Weakly supervised induction
   >>> senses = se.induce_senses("bank")
-  >>> print(senses.keys())  # dict_keys(['financial', 'river'])
 
 Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
 License: MIT
 Repository: https://github.com/kow-k/sense-explorer
 """
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 __author__ = "Kow Kuroda & Claude"
 
 import numpy as np
@@ -77,6 +82,13 @@ try:
     GEOMETRY_AVAILABLE = True
 except ImportError:
     GEOMETRY_AVAILABLE = False
+
+# Import WordNet for synset-guided separation
+try:
+    from nltk.corpus import wordnet as wn
+    WORDNET_AVAILABLE = True
+except ImportError:
+    WORDNET_AVAILABLE = False
 
 
 # =============================================================================
@@ -533,7 +545,355 @@ class SenseExplorer:
             print(f"  Anchor quality: {quality_summary}")
         
         return sense_embs
-    
+
+    # =========================================================================
+    # WordNet-Guided Sense Separation
+    # =========================================================================
+
+    def separate_senses_wordnet(
+        self,
+        word: str,
+        hyponym_depth: int = 2,
+        merge_threshold: float = 0.70,
+        min_anchors: int = 2,
+        pos_filter: str = None,
+        noise_level: float = None,
+        force: bool = False,
+        return_details: bool = False,
+    ) -> Dict[str, np.ndarray]:
+        """
+        WORDNET-GUIDED sense separation via synset-derived anchors.
+
+        Bridges unsupervised discovery and supervised induction: WordNet
+        provides structural guidance (which senses to look for), while
+        embedding geometry determines which senses the corpus actually
+        supports. The same attractor-following mechanism as discover_senses
+        and induce_senses, but with anchors derived automatically from
+        WordNet's sense inventory.
+
+        The method operates on the supervision continuum:
+          - discover_senses_auto: fully unsupervised (geometry decides k and content)
+          - discover_senses:      geometry decides content, user decides k
+          - separate_senses_wordnet: WordNet guides both k and content (THIS)
+          - induce_senses:        user provides anchors directly
+
+        Algorithm:
+          1. Query WordNet for all synsets of the target word
+          2. For each synset, collect lemmas + hyponym lemmas as anchors
+          3. Filter for embedding vocabulary presence
+          4. Merge synsets whose anchor centroids overlap in embedding space
+             (cosine similarity > merge_threshold)
+          5. Feed merged anchor groups into attractor-following (sense_loyal)
+          6. Return sense vectors keyed by synset names
+
+        Args:
+            word: Target polysemous word
+            hyponym_depth: Levels of hyponyms to traverse (default: 2)
+            merge_threshold: Cosine similarity above which synset groups
+                are merged (default: 0.70). Lower = more aggressive merging.
+            min_anchors: Minimum in-vocabulary anchors for a synset to be
+                viable (default: 2). Synsets with fewer are dropped.
+            pos_filter: Restrict to POS ('n', 'v', 'a', 'r') or None for all.
+            noise_level: Override default noise level.
+            force: Force re-separation even if cached.
+            return_details: If True, return (sense_embs, details_dict) with
+                anchor groups, merge history, and synset metadata.
+
+        Returns:
+            Dict mapping sense names (synset names) to sense-specific embeddings.
+            If return_details=True, returns (sense_embs, details) tuple.
+
+        Raises:
+            ImportError: If NLTK/WordNet is not installed.
+            ValueError: If word is not in vocabulary.
+
+        Example:
+            >>> se = SenseExplorer.from_glove("glove.6B.300d.txt")
+            >>> senses = se.separate_senses_wordnet("bank")
+            >>> print(senses.keys())
+            dict_keys(['depository_financial_institution.n.01', 'bank.n.01'])
+        """
+        if not WORDNET_AVAILABLE:
+            raise ImportError(
+                "WordNet-guided separation requires NLTK with WordNet data. "
+                "Install with: pip install nltk && python -c "
+                "\"import nltk; nltk.download('wordnet')\""
+            )
+
+        if word not in self.vocab:
+            raise ValueError(f"Word '{word}' not in vocabulary")
+
+        cache_key = f"{word}_wordnet"
+        if not force and cache_key in self._sense_cache:
+            if return_details:
+                details = getattr(self, '_wordnet_details_cache', {}).get(cache_key, {})
+                return self._sense_cache[cache_key], details
+            return self._sense_cache[cache_key]
+
+        noise = noise_level if noise_level is not None else self.noise_level
+
+        # Step 1: Get synsets
+        synsets = wn.synsets(word)
+        if pos_filter:
+            pos_map = {'n': wn.NOUN, 'v': wn.VERB, 'a': wn.ADJ, 'r': wn.ADV}
+            wn_pos = pos_map.get(pos_filter)
+            if wn_pos:
+                synsets = [s for s in synsets if s.pos() == wn_pos]
+
+        if not synsets:
+            emb = self._embeddings_norm[word]
+            result = {'default': emb}
+            self._sense_cache[cache_key] = result
+            if return_details:
+                return result, {'synsets': [], 'reason': 'no_synsets'}
+            return result
+
+        # Step 2: Extract anchors per synset
+        synset_anchors = self._extract_wordnet_anchors(
+            word, synsets, hyponym_depth, min_anchors)
+
+        if self.verbose:
+            print(f"  [WORDNET] {len(synsets)} synsets for '{word}', "
+                  f"{len(synset_anchors)} have ≥{min_anchors} in-vocab anchors")
+
+        if len(synset_anchors) < 2:
+            emb = self._embeddings_norm[word]
+            result = {'default': emb}
+            self._sense_cache[cache_key] = result
+            if return_details:
+                return result, {
+                    'synsets': synsets,
+                    'synset_anchors': synset_anchors,
+                    'reason': 'insufficient_viable_synsets'
+                }
+            return result
+
+        # Step 3: Merge synsets with overlapping anchor centroids
+        merged_groups, merge_history = self._merge_synset_groups(
+            synset_anchors, merge_threshold)
+
+        if self.verbose:
+            print(f"  [WORDNET] Merged {len(synset_anchors)} synset groups "
+                  f"→ {len(merged_groups)} distinct sense groups")
+            for name, anchors in merged_groups.items():
+                print(f"    {name}: {len(anchors)} anchors "
+                      f"({', '.join(list(anchors)[:5])}{'...' if len(anchors) > 5 else ''})")
+
+        if len(merged_groups) < 2:
+            emb = self._embeddings_norm[word]
+            result = {'default': emb}
+            self._sense_cache[cache_key] = result
+            if return_details:
+                return result, {
+                    'synsets': synsets,
+                    'merged_groups': merged_groups,
+                    'merge_history': merge_history,
+                    'reason': 'all_synsets_merged'
+                }
+            return result
+
+        # Step 4: Validate anchors
+        anchor_quality = self._validate_anchors(word, merged_groups, warn=self.verbose)
+
+        # Step 5: Compute centroids and run attractor-following
+        sense_centroids = self._compute_sense_centroids(merged_groups)
+
+        if len(sense_centroids) < 2:
+            emb = self._embeddings_norm[word]
+            result = {'default': emb}
+            self._sense_cache[cache_key] = result
+            if return_details:
+                return result, {
+                    'synsets': synsets,
+                    'reason': 'centroids_collapsed'
+                }
+            return result
+
+        sense_embs = self._simulated_repair(
+            word, sense_centroids, noise, sense_loyal=True)
+
+        # Cache results
+        self._sense_cache[cache_key] = sense_embs
+        self._anchor_cache[cache_key] = merged_groups
+
+        details = {
+            'synsets': synsets,
+            'n_synsets_total': len(synsets),
+            'synset_anchors': synset_anchors,
+            'merged_groups': merged_groups,
+            'merge_history': merge_history,
+            'anchor_quality': anchor_quality,
+            'n_groups_after_merge': len(merged_groups),
+            'n_senses_returned': len(sense_embs),
+        }
+        if not hasattr(self, '_wordnet_details_cache'):
+            self._wordnet_details_cache = {}
+        self._wordnet_details_cache[cache_key] = details
+
+        if self.verbose:
+            quality_summary = {s: info['quality'] for s, info in anchor_quality.items()}
+            print(f"  [WORDNET] Separated {len(sense_embs)} senses for '{word}'")
+            print(f"  Anchor quality: {quality_summary}")
+
+        if return_details:
+            return sense_embs, details
+        return sense_embs
+
+    def _extract_wordnet_anchors(
+        self,
+        word: str,
+        synsets: list,
+        hyponym_depth: int = 2,
+        min_anchors: int = 2,
+    ) -> Dict[str, List[str]]:
+        """Extract vocabulary-filtered anchor words from WordNet synsets.
+
+        For each synset, collects lemma names and hyponym lemma names
+        (to specified depth), filters for embedding vocabulary presence,
+        and removes the target word itself.
+
+        Args:
+            word: Target word (excluded from anchor lists).
+            synsets: List of WordNet synset objects.
+            hyponym_depth: Levels of hyponym tree to traverse.
+            min_anchors: Minimum in-vocabulary anchors for viability.
+
+        Returns:
+            Dict of {synset_name: [anchor_words]} for viable synsets.
+        """
+        result = {}
+        target_lemmas = {word, word.lower(), word.upper()}
+
+        for synset in synsets:
+            anchors = set()
+
+            # Direct lemma names
+            for lemma in synset.lemmas():
+                name = lemma.name().lower().replace('_', ' ')
+                for part in name.split():
+                    anchors.add(part)
+
+            # Hypernyms (1 level)
+            for hyper in synset.hypernyms():
+                for lemma in hyper.lemmas():
+                    name = lemma.name().lower().replace('_', ' ')
+                    for part in name.split():
+                        anchors.add(part)
+
+            # Hyponyms (recursive)
+            def collect_hypo(ss, depth):
+                if depth <= 0:
+                    return
+                for hypo in ss.hyponyms():
+                    for lemma in hypo.lemmas():
+                        name = lemma.name().lower().replace('_', ' ')
+                        for part in name.split():
+                            anchors.add(part)
+                    collect_hypo(hypo, depth - 1)
+
+            collect_hypo(synset, hyponym_depth)
+
+            # Similar-to and also-see
+            for related in synset.similar_tos() + synset.also_sees():
+                for lemma in related.lemmas():
+                    name = lemma.name().lower().replace('_', ' ')
+                    for part in name.split():
+                        anchors.add(part)
+
+            # Gloss words (filtered)
+            _stopwords = {
+                'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been',
+                'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+                'would', 'could', 'should', 'may', 'might', 'can', 'shall',
+                'of', 'in', 'to', 'for', 'with', 'on', 'at', 'from', 'by',
+                'as', 'into', 'through', 'during', 'before', 'after', 'above',
+                'below', 'between', 'out', 'off', 'over', 'under', 'again',
+                'further', 'then', 'once', 'that', 'this', 'these', 'those',
+                'or', 'and', 'but', 'if', 'while', 'because', 'until', 'so',
+                'not', 'no', 'nor', 'only', 'own', 'same', 'than', 'too',
+                'very', 'just', 'about', 'such', 'it', 'its', 'which', 'who',
+                'whom', 'what', 'where', 'when', 'how', 'all', 'each',
+                'every', 'both', 'few', 'more', 'most', 'other', 'some',
+                'any', 'etc',
+            }
+            for text in [synset.definition()] + synset.examples():
+                for w in text.split():
+                    cleaned = w.strip('.,;:!?()[]"\'').lower()
+                    if len(cleaned) > 2 and cleaned not in _stopwords:
+                        anchors.add(cleaned)
+
+            # Filter: in vocabulary, not the target word
+            anchors = [a for a in anchors
+                       if a in self.vocab and a not in target_lemmas]
+
+            if len(anchors) >= min_anchors:
+                result[synset.name()] = anchors
+
+        return result
+
+    def _merge_synset_groups(
+        self,
+        synset_anchors: Dict[str, List[str]],
+        merge_threshold: float = 0.70,
+    ) -> tuple:
+        """Merge synsets whose anchor centroids are too similar.
+
+        Iteratively merges the most similar pair until no pair exceeds
+        the threshold. Merged group names join with '+'.
+
+        Args:
+            synset_anchors: Dict of {synset_name: [anchor_words]}.
+            merge_threshold: Cosine similarity above which groups merge.
+
+        Returns:
+            Tuple of (merged_groups, merge_history) where merged_groups
+            is Dict[str, List[str]] and merge_history is a list of
+            (group1, group2, similarity) tuples.
+        """
+        # Compute centroids for each group
+        groups = dict(synset_anchors)  # copy
+        merge_history = []
+
+        while len(groups) > 1:
+            # Compute centroids
+            centroids = {}
+            for name, anchors in groups.items():
+                vecs = [self._embeddings_norm[w] for w in anchors if w in self.vocab]
+                if vecs:
+                    c = np.mean(vecs, axis=0)
+                    c = c / (norm(c) + 1e-10)
+                    centroids[name] = c
+
+            # Find most similar pair
+            names = list(centroids.keys())
+            best_sim = -1
+            best_pair = None
+
+            for i in range(len(names)):
+                for j in range(i + 1, len(names)):
+                    sim = float(centroids[names[i]] @ centroids[names[j]])
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_pair = (names[i], names[j])
+
+            if best_sim < merge_threshold or best_pair is None:
+                break
+
+            # Merge
+            n1, n2 = best_pair
+            merged_name = f"{n1}+{n2}"
+            # Deduplicate anchors
+            merged_anchors = list(set(groups[n1] + groups[n2]))
+            groups[merged_name] = merged_anchors
+            del groups[n1]
+            del groups[n2]
+            merge_history.append((n1, n2, best_sim))
+
+            if self.verbose:
+                print(f"    Merged {n1} + {n2} (cos={best_sim:.3f})")
+
+        return groups, merge_history
+
     def explore_senses(
         self,
         word: str,
@@ -547,8 +907,9 @@ class SenseExplorer:
             word: Target word
             mode: One of:
                   - 'discover': Unsupervised with specified n_senses
-                  - 'discover_auto': Unsupervised, auto-detect n_senses (X-means)
+                  - 'discover_auto': Unsupervised, auto-detect n_senses
                   - 'induce': Weakly supervised with anchors
+                  - 'wordnet': WordNet-guided separation
                   - 'auto': Induce if anchors available, else discover_auto
             **kwargs: Passed to the underlying method
         
@@ -556,8 +917,9 @@ class SenseExplorer:
             Dict mapping sense names to sense-specific embeddings
         
         Example:
-            >>> se.explore_senses("bank", mode='discover_auto')  # X-means
+            >>> se.explore_senses("bank", mode='discover_auto')  # Spectral
             >>> se.explore_senses("bank", mode='induce')         # With anchors
+            >>> se.explore_senses("bank", mode='wordnet')        # WordNet-guided
             >>> se.explore_senses("bank", mode='auto')           # Best available
         """
         if mode == 'discover':
@@ -566,6 +928,8 @@ class SenseExplorer:
             return self.discover_senses_auto(word, **kwargs)
         elif mode == 'induce':
             return self.induce_senses(word, **kwargs)
+        elif mode == 'wordnet':
+            return self.separate_senses_wordnet(word, **kwargs)
         elif mode == 'auto':
             # Try hybrid extraction; if fails, fall back to X-means discovery
             if self._hybrid_extractor is not None:
@@ -574,7 +938,8 @@ class SenseExplorer:
                     return self.induce_senses(word, anchors=anchors, **kwargs)
             return self.discover_senses_auto(word, **kwargs)
         else:
-            raise ValueError(f"Unknown mode: {mode}. Use 'discover', 'discover_auto', 'induce', or 'auto'")
+            raise ValueError(f"Unknown mode: {mode}. Use 'discover', "
+                           f"'discover_auto', 'induce', 'wordnet', or 'auto'")
     
     def _extract_anchors_hybrid(self, word: str, n_senses: int) -> Dict[str, List[str]]:
         """

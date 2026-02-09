@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.9.0-green.svg)](https://github.com/kow-k/sense-explorer)
+[![Version](https://img.shields.io/badge/version-0.9.1-green.svg)](https://github.com/kow-k/sense-explorer)
 
 A lightweight, training-free framework for exploring word sense structure in static embeddings (GloVe, Word2Vec, FastText).
 
@@ -23,17 +23,27 @@ The self-repair algorithm does not sample the embedding space—it **follows att
 - Random anchors yield separated but **semantically wrong** senses (100% separation, 6.4% alignment)
 - Good anchors yield both separation **and** correctness (100% separation, 99.9% alignment)
 
-## Four Capabilities
+## The Supervision Continuum
 
-| Capability | Method | Supervision | Accuracy |
-|------------|--------|-------------|----------|
-| **Sense Discovery** | `discover_senses()` | Unsupervised | 90% (spectral) |
-| **Sense Discovery (Auto)** | `discover_senses_auto()` | Unsupervised + Parameter-free | 90% (spectral) |
-| **Sense Induction** | `induce_senses()` | Weakly supervised | 88% |
-| **Polarity Classification** | `get_polarity()` | Supervised | 97% |
-| **Sense Geometry** | `localize_senses()` | Post-analysis | — |
+The same attractor-following mechanism operates across the entire supervision spectrum — from fully unsupervised to knowledge-guided — and the comparison between modes is itself informative.
 
-**What's new in v0.9.0**:
+| Capability | Method | Supervision | Description |
+|------------|--------|-------------|-------------|
+| **Sense Discovery (Auto)** | `discover_senses_auto()` | Unsupervised | Geometry decides k and content (spectral, 90%) |
+| **Sense Discovery** | `discover_senses(k)` | Semi-supervised | User decides k, geometry decides content |
+| **WordNet-Guided Separation** | `separate_senses_wordnet()` | Knowledge-guided | WordNet provides structure, geometry filters |
+| **Sense Induction** | `induce_senses()` | Weakly supervised | User-provided anchors guide separation (88%) |
+| **Polarity Classification** | `get_polarity()` | Supervised | Seed-guided polarity axis (97%) |
+| **Sense Geometry** | `localize_senses()` | Post-analysis | Geometric structure of separated senses |
+
+**What's new in v0.9.1**:
+- **WordNet-guided sense separation**: `separate_senses_wordnet()` automatically derives anchors from WordNet synsets — lemmas, hyponyms, hypernyms, glosses — filters for vocabulary presence, and merges synsets whose anchor centroids overlap in embedding space
+- **Synset merging**: Iteratively merges the most similar synset pair until geometric separation is sufficient, so WordNet's 18 synsets for "bank" collapse to however many the embedding actually distinguishes
+- **Supervision continuum**: The gap between unsupervised and WordNet-guided results directly measures the mismatch between corpus-encoded sense structure and lexicographic sense inventories
+- **`explore_senses()` updated**: New `mode='wordnet'` option alongside existing modes
+- **CLI**: `--method wordnet` flag in run_synset_mapping.py for WordNet-guided separation with full synset mapping pipeline
+
+**What was new in v0.9.0**:
 - **Sense geometry analysis**: `localize_senses()` decomposes word vectors into sense components and reveals the molecular-like angular structure of polysemous embeddings
 - **`SenseDecomposition` dataclass**: Rich result object with angles, coefficients, R², dimensional territories, and interference patterns
 - **Molecular diagrams**: Publication-quality visualizations of sense geometry
@@ -52,8 +62,11 @@ The self-repair algorithm does not sample the embedding space—it **follows att
 ```bash
 pip install sense-explorer
 
-# For full functionality (WordNet gloss extraction):
+# For full functionality (WordNet-guided separation + gloss extraction):
 pip install sense-explorer[full]
+
+# WordNet data (required for separate_senses_wordnet):
+python -c "import nltk; nltk.download('wordnet')"
 ```
 
 Or from source:
@@ -70,9 +83,7 @@ pip install -e .
 from sense_explorer import SenseExplorer
 
 # Load embeddings (spectral clustering is now default!)
-se = SenseExplorer.from_glove("glove.6B.100d.txt")
-# Output: SenseExplorer v0.8.0 initialized with 400,000 words, dim=100
-#         Clustering method: spectral (top_k=50)
+se = SenseExplorer.from_glove("glove.6B.300d.txt")
 
 # UNSUPERVISED: Sense discovery with spectral clustering
 senses = se.discover_senses("bank", n_senses=2)
@@ -82,6 +93,14 @@ print(senses.keys())  # dict_keys(['sense_0', 'sense_1'])
 senses = se.discover_senses_auto("bank")  # No n_senses needed!
 print(f"Found {len(senses)} senses")  # Automatically determined via eigengap
 
+# WORDNET-GUIDED: Lexicographic structure + geometric filtering
+senses = se.separate_senses_wordnet("bank")
+print(senses.keys())  # Synset names, e.g. dict_keys(['depository_financial_institution.n.01', 'bank.n.01'])
+
+# With full diagnostics
+senses, details = se.separate_senses_wordnet("bank", return_details=True)
+print(f"Merged {details['n_synsets_total']} synsets → {details['n_groups_after_merge']} sense groups")
+
 # WEAKLY SUPERVISED: Anchor-guided induction (88% accuracy)
 senses = se.induce_senses("bank")
 print(senses.keys())  # dict_keys(['financial', 'river'])
@@ -90,9 +109,10 @@ print(senses.keys())  # dict_keys(['financial', 'river'])
 polarity = se.get_polarity("excellent")
 print(polarity)  # {'polarity': 'positive', 'score': 0.82, ...}
 
-# Compare clustering methods
-senses_spectral = se.discover_senses("bank", clustering_method='spectral')  # 90% at 50d
-senses_xmeans = se.discover_senses("bank", clustering_method='xmeans')      # 64% at 50d
+# Compare any mode via the convenience wrapper
+senses_auto = se.explore_senses("bank", mode='discover_auto')
+senses_wn   = se.explore_senses("bank", mode='wordnet')
+senses_ind  = se.explore_senses("bank", mode='induce')
 ```
 
 ## Why Spectral Clustering?
@@ -208,7 +228,7 @@ plot_word_dashboard(decomp, "bank_dashboard.png")
 results = se.analyze_geometry(["bank", "cell", "run"], save_dir="output/")
 ```
 
-## The Three Modes Explained
+## The Modes Explained
 
 ### 1. Unsupervised Discovery (`discover_senses`)
 
@@ -243,14 +263,46 @@ print(f"Found {len(senses)} senses")  # Automatically determined!
 senses = se.discover_senses_auto("bank", clustering_method='xmeans')
 ```
 
-### 2. Weakly Supervised Induction (`induce_senses`)
+### 2. WordNet-Guided Separation (`separate_senses_wordnet`) — NEW in v0.9.1
+
+Bridges unsupervised discovery and supervised induction. WordNet provides structural guidance (which senses to look for), while embedding geometry determines which senses the corpus actually supports:
+
+- Automatically derives anchors from WordNet synsets (lemmas, hyponyms, hypernyms, glosses)
+- Filters for embedding vocabulary presence
+- Merges synsets whose anchor centroids overlap in embedding space (cosine > threshold)
+- Sense names are WordNet synset names (e.g., `depository_financial_institution.n.01`)
+- The gap between unsupervised and WordNet-guided results measures corpus–lexicon mismatch
+
+```python
+# Basic usage — let geometry decide what survives
+senses = se.separate_senses_wordnet("bank")
+print(senses.keys())
+# e.g. dict_keys(['depository_financial_institution.n.01', 'bank.n.01'])
+
+# With full diagnostics
+senses, details = se.separate_senses_wordnet("bank", return_details=True)
+print(f"WordNet has {details['n_synsets_total']} synsets")
+print(f"After merging: {details['n_groups_after_merge']} distinct groups")
+print(f"Merge history: {details['merge_history']}")  # Which synsets collapsed
+
+# Tune merge aggressiveness
+senses = se.separate_senses_wordnet("bank", merge_threshold=0.60)  # More merging
+senses = se.separate_senses_wordnet("bank", merge_threshold=0.85)  # Preserve more distinctions
+
+# Restrict to nouns only
+senses = se.separate_senses_wordnet("bank", pos_filter='n')
+```
+
+**How merging works**: WordNet lists 18 synsets for "bank". Many are too similar in embedding space to separate (e.g., `bank.v.03` "do business with a bank" vs. `bank.v.05` "be in the banking business"). The algorithm iteratively merges the most similar pair until all remaining groups are geometrically distinct. The `merge_threshold` parameter controls this — at 0.70 (default), only groups with cosine similarity < 0.70 survive as separate senses.
+
+### 3. Weakly Supervised Induction (`induce_senses`)
 
 Knowledge-guided sense induction:
 - Uses FrameNet frames or WordNet glosses as anchors
 - Senses induced toward anchor-defined targets
 - Meaningful sense names (`financial`, `river`, ...)
 - ~88% accuracy
-- **NEW**: Automatic anchor validation warns about low-quality anchors
+- Automatic anchor validation warns about low-quality anchors
 
 ```python
 senses = se.induce_senses("bank")
@@ -276,7 +328,7 @@ report = extractor.assess_quality("bank", anchors, embeddings_norm=emb_norm)
 print(report['overall'])  # 'good', 'fair', or 'poor'
 ```
 
-### 3. Supervised Polarity (`get_polarity`)
+### 4. Supervised Polarity (`get_polarity`)
 
 Polarity classification with seed supervision:
 - Requires positive/negative seed words
@@ -291,21 +343,28 @@ polarity = se.get_polarity("terrible")
 
 ## Theoretical Background
 
-### The Supervision Spectrum
+### The Supervision Continuum
+
+All modes share the same attractor-following mechanism but differ in where guidance comes from:
 
 ```
-Fully Unsupervised    Weakly Supervised    Fully Supervised    Post-Analysis
-       │                     │                    │                  │
-  discover_senses()    induce_senses()     get_polarity()   localize_senses()
-  discover_senses_auto()                                    analyze_geometry()
-       │                     │                    │                  │
-   No targets          Anchor targets        Seed labels     Sense vectors →
-   90% accuracy        88% accuracy          97% accuracy    Geometry analysis
-   (spectral)
-       │
-  Eigengap: auto k
-  (parameter-free!)
+Fully Unsupervised    Knowledge-Guided    Weakly Supervised    Fully Supervised    Post-Analysis
+       │                     │                    │                   │                  │
+  discover_senses()   separate_senses     induce_senses()     get_polarity()   localize_senses()
+  discover_senses      _wordnet()                                               analyze_geometry()
+    _auto()                  │                    │                   │                  │
+       │              WordNet synsets        Anchor targets       Seed labels     Sense vectors →
+   No targets         as structural          88% accuracy        97% accuracy    Geometry analysis
+   90% accuracy       hints; geometry
+   (spectral)         filters what
+       │              corpus supports
+  Eigengap: auto k          │
+  (parameter-free!)   Synset merging:
+                      geometry has
+                      the final word
 ```
+
+The comparison between modes is itself informative: the gap between `discover_senses_auto` and `separate_senses_wordnet` for the same word directly measures how well the corpus-encoded sense structure aligns with lexicographic sense inventories.
 
 ### Why Spectral Clustering Works
 
@@ -323,10 +382,12 @@ X-means (BIC) fails at low dimensions because it assumes Gaussian clusters. Spec
 
 ### DNA Self-Repair Analogy
 
-Both sense discovery and induction use the same mechanism:
+All modes on the supervision continuum — discovery, WordNet-guided separation, and induction — use the same mechanism:
 1. **Damage** (noise injection): Perturb the embedding
 2. **Repair** (self-organization): Settle into stable configurations
 3. **Diagnosis** (attractor identification): Observe attractor basins
+
+What differs is the **source of attractors**: spectral clustering discovers them from geometry, WordNet synsets derive them from lexicographic structure, and user-provided anchors define them directly. The mechanism is the same — attractor-following — and the algorithm is agnostic to where the attractors come from.
 
 Critically, the algorithm is **attractor-following**, not space-sampling. Anchor centroids define deterministic attractors, and seeded copies converge to those attractors regardless of how many copies (N) are created. This explains why:
 
@@ -367,16 +428,34 @@ SenseExplorer(
 |--------|------|-------------|
 | `discover_senses(word, n_senses)` | Unsupervised | Sense discovery (spectral default) |
 | `discover_senses_auto(word)` | Unsupervised | Parameter-free discovery (eigengap) |
+| `separate_senses_wordnet(word)` | Knowledge-guided | WordNet synset-guided separation |
 | `induce_senses(word)` | Weakly supervised | Anchor-guided induction |
 | `localize_senses(word)` | Geometry | Decompose word vector into sense components |
 | `analyze_geometry(words)` | Geometry | Batch cross-word geometry analysis |
 | `_validate_anchors(word, anchors)` | Diagnostic | Check anchor quality before induction |
-| `explore_senses(word, mode)` | Auto | Convenience wrapper |
+| `explore_senses(word, mode)` | Auto | Convenience wrapper (all modes) |
 | `get_polarity(word)` | Supervised | Polarity classification |
 | `classify_polarity(words)` | Supervised | Batch polarity |
 | `get_polarity_finder(domain)` | Supervised | Advanced polarity ops |
 | `similarity(w1, w2)` | - | Sense-aware similarity |
 | `disambiguate(word, context)` | - | Context-based disambiguation |
+
+### WordNet-Guided Separation Parameters
+
+```python
+se.separate_senses_wordnet(
+    word,                        # Target polysemous word
+    hyponym_depth=2,             # Levels of hyponym tree to traverse
+    merge_threshold=0.70,        # Cosine threshold for synset merging (lower = more merging)
+    min_anchors=2,               # Minimum in-vocabulary anchors per synset
+    pos_filter=None,             # Restrict to POS: 'n', 'v', 'a', 'r', or None for all
+    noise_level=None,            # Override default noise level
+    force=False,                 # Force re-separation even if cached
+    return_details=False,        # Return (senses, details_dict) tuple
+)
+```
+
+**`merge_threshold` tuning**: At 0.70 (default), synsets with centroid cosine similarity ≥ 0.70 merge. Lower values (0.50–0.60) produce fewer, coarser senses; higher values (0.80–0.90) preserve more of WordNet's granularity. The comparison across thresholds reveals the granularity structure of the embedding space.
 
 ### Spectral Clustering Functions
 
@@ -453,6 +532,7 @@ plot_angle_summary([decomp1, decomp2, decomp3], "angles.png")
 
 ## Version History
 
+- **v0.9.1**: WordNet-guided sense separation (`separate_senses_wordnet`), synset anchor extraction with hyponym drill-down, iterative synset merging by centroid similarity, `explore_senses(mode='wordnet')`, `--method wordnet` CLI support, cache-busting `force` parameter for sweep/oversplit operations
 - **v0.9.0**: Sense geometry module (`localize_senses`, `analyze_geometry`), `SenseDecomposition` dataclass, molecular diagrams, cross-word batch analysis
 - **v0.8.0**: Attractor-following insight, anchor validation, n_copies 100→30, vectorized self-repair, `assess_quality()`
 - **v0.7.0**: Spectral clustering default (90% at 50d), eigengap k selection, `clustering_method` parameter
@@ -464,7 +544,7 @@ plot_angle_summary([decomp1, decomp2, decomp3], "angles.png")
 
 ```bibtex
 @article{kuroda2026sense,
-  title={Sese separation: From sense mining to sense induction via simulated self-repair over word embeddings},
+  title={Sense separation: From sense mining to sense induction via simulated self-repair over word embeddings},
   author={Kuroda, Kow and Claude},
   journal={arXiv preprint},
   year={2026}

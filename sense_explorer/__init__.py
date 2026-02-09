@@ -10,18 +10,23 @@ space-sampling. Anchor centroids define deterministic attractors—success
 depends on anchor quality, not the number of noisy copies (N). Even N=3
 achieves perfect separation when anchors are good.
 
-Four capabilities:
-  - discover_senses(): Unsupervised - spectral clustering (90% at 50d)
-  - induce_senses():   Weakly supervised - anchor-guided (88% accuracy)
-  - find_polarity():   Supervised - polarity classification (97% accuracy)
-  - localize_senses(): Geometric analysis of separated senses
+Five capabilities on the supervision continuum:
+  - discover_senses_auto():      Unsupervised - spectral clustering (90% at 50d)
+  - discover_senses():           Semi-supervised - user specifies k
+  - separate_senses_wordnet():   WordNet-guided - lexicographic structure + geometry
+  - induce_senses():             Weakly supervised - anchor-guided (88% accuracy)
+  - find_polarity():             Supervised - polarity classification (97% accuracy)
 
 Basic Usage:
     >>> from sense_explorer import SenseExplorer
-    >>> se = SenseExplorer.from_glove("glove.6B.100d.txt")
+    >>> se = SenseExplorer.from_glove("glove.6B.300d.txt")
     
     # Unsupervised discovery (spectral, 90% at 50d)
     >>> senses = se.discover_senses_auto("bank")
+    
+    # WordNet-guided separation
+    >>> senses = se.separate_senses_wordnet("bank")
+    >>> print(senses.keys())  # Synset names as keys
     
     # Knowledge-guided induction (88% accuracy)
     >>> senses = se.induce_senses("bank")
@@ -35,7 +40,7 @@ Basic Usage:
 
 Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
 License: MIT
-Version: 0.9.0
+Version: 0.9.1
 """
 
 from .core import (
@@ -80,7 +85,7 @@ from .geometry import (
     plot_angle_summary,
 )
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 __author__ = "Kow Kuroda & Claude"
 __all__ = [
     # Core
