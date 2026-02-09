@@ -894,6 +894,137 @@ class SenseExplorer:
 
         return groups, merge_history
 
+    @staticmethod
+    def wordnet_sweep_k_values(n_synsets: int) -> List[int]:
+        """Compute k values for WordNet-guided granularity sweep.
+
+        Given N synsets, returns sorted unique k values from
+        k = round(N/i) for i in [1, 1.5, 2, 2.5, 3, 4, 5, ...], descending.
+        The half-steps at i=1.5 and i=2.5 fill important gaps between
+        the coarsest levels (e.g., N=18: k=12 between 18 and 9).
+        Filters out k < 2.
+
+        Args:
+            n_synsets: Number of WordNet synsets for the target word.
+
+        Returns:
+            List of k values in descending order.
+
+        Example:
+            >>> SenseExplorer.wordnet_sweep_k_values(18)
+            [18, 12, 9, 7, 6, 4, 3, 2]
+        """
+        max_i = max(1, round(n_synsets / 2))
+        divisors = [1, 1.5, 2, 2.5] + list(range(3, max_i + 1))
+        divisors = [d for d in divisors if d <= max_i]
+        k_values = set()
+        for d in divisors:
+            k = round(n_synsets / d)
+            if k >= 2:
+                k_values.add(k)
+        return sorted(k_values, reverse=True)
+
+    def sweep_senses_wordnet(
+        self,
+        word: str,
+        k_values: List[int] = None,
+        **kwargs,
+    ) -> List[Dict]:
+        """Sweep sense separation across WordNet-guided granularity levels.
+
+        Runs discover_senses at each k value derived from the WordNet
+        synset count, providing a top-down view from lexicographic
+        granularity to the coarsest separation the corpus supports.
+
+        This is the SenseExplorer-native version of the --wordnet-sweep
+        functionality in run_synset_mapping.py.
+
+        Args:
+            word: Target polysemous word.
+            k_values: Explicit list of k values to sweep. If None,
+                auto-computed from WordNet synset count via
+                wordnet_sweep_k_values().
+            **kwargs: Passed to discover_senses (e.g., noise_level).
+
+        Returns:
+            List of dicts, one per k level (descending), each containing:
+              - 'requested_k': The k value requested
+              - 'actual_k': Number of senses actually returned
+              - 'senses': Dict[str, np.ndarray] of sense embeddings
+              - 'inter_sense_angles': List of (s1, s2, angle_deg) tuples
+
+        Raises:
+            ImportError: If NLTK/WordNet is not installed.
+            ValueError: If word is not in vocabulary.
+
+        Example:
+            >>> se = SenseExplorer.from_glove("glove.6B.300d.txt")
+            >>> results = se.sweep_senses_wordnet("bank")
+            >>> for r in results:
+            ...     print(f"k={r['requested_k']}→{r['actual_k']}, "
+            ...           f"min_angle={min(a for _,_,a in r['inter_sense_angles']) if r['inter_sense_angles'] else float('nan'):.1f}°")
+        """
+        if not WORDNET_AVAILABLE:
+            raise ImportError(
+                "WordNet sweep requires NLTK with WordNet data. "
+                "Install with: pip install nltk && python -c "
+                "\"import nltk; nltk.download('wordnet')\""
+            )
+
+        if word not in self.vocab:
+            raise ValueError(f"Word '{word}' not in vocabulary")
+
+        # Determine k values
+        if k_values is None:
+            synsets = wn.synsets(word)
+            n_synsets = len(synsets)
+            if n_synsets < 2:
+                if self.verbose:
+                    print(f"  [SWEEP] '{word}' has {n_synsets} synset(s), nothing to sweep")
+                return []
+            k_values = self.wordnet_sweep_k_values(n_synsets)
+            if self.verbose:
+                print(f"  [SWEEP] '{word}': N={n_synsets} synsets → "
+                      f"k values: {k_values}")
+
+        results = []
+        for target_k in k_values:
+            try:
+                sense_dict = self.discover_senses(
+                    word, n_senses=target_k, force=True, **kwargs)
+                sense_names = sorted(sense_dict.keys())
+                actual_k = len(sense_names)
+
+                # Compute inter-sense angles
+                angles = []
+                vecs = [sense_dict[s] for s in sense_names]
+                for i in range(len(vecs)):
+                    for j in range(i + 1, len(vecs)):
+                        cos_sim = float(vecs[i] @ vecs[j])
+                        cos_sim = max(-1.0, min(1.0, cos_sim))
+                        angle_deg = float(np.degrees(np.arccos(cos_sim)))
+                        angles.append((sense_names[i], sense_names[j], angle_deg))
+
+                result = {
+                    'requested_k': target_k,
+                    'actual_k': actual_k,
+                    'senses': sense_dict,
+                    'inter_sense_angles': angles,
+                }
+                results.append(result)
+
+                if self.verbose:
+                    min_angle = min(a for _, _, a in angles) if angles else float('nan')
+                    k_str = f"{target_k}" if actual_k == target_k else f"{target_k}→{actual_k}"
+                    print(f"    k={k_str}: {actual_k} senses, "
+                          f"min angle {min_angle:.1f}°")
+
+            except Exception as e:
+                if self.verbose:
+                    print(f"    k={target_k}: failed ({e})")
+
+        return results
+
     def explore_senses(
         self,
         word: str,
