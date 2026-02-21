@@ -10,7 +10,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="sense-explorer",
-    version="0.6.0",
+    version="0.9.3",
     author="Kow Kuroda & Claude",
     author_email="kow.k@ks.kyorin-u.ac.jp",
     description="From sense discovery to sense induction via simulated self-repair",
@@ -50,6 +50,8 @@ setup(
         ],
     },
     keywords=[
+        "embedding-merger",
+        "word-embedding-merger",
         "word-embeddings",
         "word-sense-induction",
         "word-sense-discovery",
