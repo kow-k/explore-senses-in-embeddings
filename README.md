@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.9.1-green.svg)](https://github.com/kow-k/sense-explorer)
+[![Version](https://img.shields.io/badge/version-0.9.3-green.svg)](https://github.com/kow-k/sense-explorer)
 
 A lightweight, training-free framework for exploring word sense structure in static embeddings (GloVe, Word2Vec, FastText).
 
@@ -23,6 +23,37 @@ The self-repair algorithm does not sample the embedding space—it **follows att
 - Random anchors yield separated but **semantically wrong** senses (100% separation, 6.4% alignment)
 - Good anchors yield both separation **and** correctness (100% separation, 99.9% alignment)
 
+## Key Insight: SSR Separates, IVA Distills
+
+Two complementary operations for understanding sense structure:
+
+| Operation | Method | Input | Output | Question Answered |
+|-----------|--------|-------|--------|-------------------|
+| **Sense Separation** | SSR (Self-Repair) | A polysemous word | Multiple sense vectors | "What senses does this word have?" |
+| **Concept Distillation** | IVA (Iterative Vector Averaging) | A set of words | Shared direction | "What do these words share?" |
+
+SSR **discovers** structure within a word. IVA **extracts** structure across words.
+Together, they form a complete pipeline: SSR → anchors → IVA → purified sense directions.
+
+## Key Insight: Sense Separation Enables Embedding Merger (NEW in v0.9.3)
+
+**Embedding merger** combines multiple embeddings (Wikipedia, Twitter, News) into a unified semantic space. The critical insight: **sense separation is a prerequisite**.
+
+```
+Without sense separation:
+  bank (wiki) = 0.6·financial + 0.3·river    ─┐
+  bank (twitter) = 0.7·financial + 0.2·slang ─┴→ messier superposition ✗
+
+With sense separation first:
+  wiki: bank_financial, bank_river           ─┐
+  twitter: bank_financial, bank_slang        ─┴→ meaningful alignment:
+                                                  • bank_financial converges ✓
+                                                  • bank_river (wiki-specific) ✓
+                                                  • bank_slang (twitter-specific) ✓
+```
+
+This models how humans build unified lexicons from diverse linguistic experiences.
+
 ## The Supervision Continuum
 
 The same attractor-following mechanism operates across the entire supervision spectrum — from fully unsupervised to knowledge-guided — and the comparison between modes is itself informative.
@@ -33,10 +64,26 @@ The same attractor-following mechanism operates across the entire supervision sp
 | **Sense Discovery** | `discover_senses(k)` | Semi-supervised | User decides k, geometry decides content |
 | **WordNet-Guided Separation** | `separate_senses_wordnet()` | Knowledge-guided | WordNet provides structure, geometry filters |
 | **Sense Induction** | `induce_senses()` | Weakly supervised | User-provided anchors guide separation (88%) |
+| **Sense Distillation** | `distill_senses()` | Post-separation | IVA extracts shared essence from anchor sets |
+| **Embedding Merger** | `merge_with()` | Cross-embedding | Align senses across multiple embeddings (NEW) |
 | **Polarity Classification** | `get_polarity()` | Supervised | Seed-guided polarity axis (97%) |
 | **Sense Geometry** | `localize_senses()` | Post-analysis | Geometric structure of separated senses |
 
-**What's new in v0.9.1**:
+**What's new in v0.9.3**:
+- **Embedding merger**: `merge_with()` combines sense inventories from multiple embeddings (Wikipedia + Twitter + News), identifying convergent (shared) vs source-specific senses
+- **Staged merger for large embeddings**: `StagedMerger` class with affinity-based merge ordering for memory-efficient processing when embeddings are too large to load simultaneously
+- **Merge strategies**: AFFINITY (merge similar embeddings first), ANCHOR (start with best quality), HIERARCHICAL (dendrogram over embeddings)
+- **Visualization**: Dendrograms showing cross-embedding sense hierarchies with automatic threshold analysis
+
+**What's new in v0.9.2**:
+- **Sense distillation via IVA**: `distill_senses()` applies Iterative Vector Averaging to extract the shared semantic essence from anchor sets — producing "purified" sense directions
+- **Two distillation modes**: Global IVA (may drift to vocabulary attractors) and Constrained IVA (stays cluster-specific, recommended)
+- **Anchor coherence measurement**: `measure_anchor_coherence()` validates anchor set quality before distillation (reference: random ~0.15, coherent ~0.45-0.55)
+- **SSR↔IVA comparison**: `distill_and_compare()` measures agreement between SSR sense vectors and IVA distilled directions
+- **Standalone distiller**: `get_distiller()` returns an `IVADistiller` for custom word set analysis
+- **Validation pipeline**: `validate_sense_distillation()` runs batch analysis across multiple words
+
+**What was new in v0.9.1**:
 - **WordNet-guided sense separation**: `separate_senses_wordnet()` automatically derives anchors from WordNet synsets — lemmas, hyponyms, hypernyms, glosses — filters for vocabulary presence, and merges synsets whose anchor centroids overlap in embedding space
 - **Synset merging**: Iteratively merges the most similar synset pair until geometric separation is sufficient, so WordNet's 18 synsets for "bank" collapse to however many the embedding actually distinguishes
 - **Supervision continuum**: The gap between unsupervised and WordNet-guided results directly measures the mismatch between corpus-encoded sense structure and lexicographic sense inventories
@@ -105,6 +152,19 @@ print(f"Merged {details['n_synsets_total']} synsets → {details['n_groups_after
 senses = se.induce_senses("bank")
 print(senses.keys())  # dict_keys(['financial', 'river'])
 
+# SENSE DISTILLATION: Extract shared essence via IVA (v0.9.2)
+results = se.distill_senses("bank")
+for sense, result in results.items():
+    print(f"{sense}: coherence={result.coherence:.3f}, exemplars={result.exemplars}")
+# financial: coherence=0.456, exemplars=['money', 'credit', 'funds', 'loan', 'capital']
+# river: coherence=0.423, exemplars=['shore', 'water', 'stream', 'flow', 'creek']
+
+# EMBEDDING MERGER: Combine multiple embeddings (NEW in v0.9.3)
+se_twitter = SenseExplorer.from_glove("glove.twitter.100d.txt")
+result = se.merge_with(se_twitter, "bank")
+print(f"Convergent senses: {result.n_convergent}")
+print(f"Source-specific: {result.n_source_specific}")
+
 # SUPERVISED: Polarity classification (97% accuracy)
 polarity = se.get_polarity("excellent")
 print(polarity)  # {'polarity': 'positive', 'score': 0.82, ...}
@@ -113,6 +173,148 @@ print(polarity)  # {'polarity': 'positive', 'score': 0.82, ...}
 senses_auto = se.explore_senses("bank", mode='discover_auto')
 senses_wn   = se.explore_senses("bank", mode='wordnet')
 senses_ind  = se.explore_senses("bank", mode='induce')
+```
+
+## Embedding Merger (NEW in v0.9.3)
+
+Combine word embeddings from multiple sources into a unified semantic space.
+
+### Why Merger Requires Sense Separation
+
+Without sense separation, merging embeddings just combines superpositions into messier superpositions. With sense separation:
+
+| Step | What Happens |
+|------|--------------|
+| 1. Sense Separation | Extract sense components from each embedding via SSR |
+| 2. Shared Basis Construction | Find vocabulary where embeddings agree about each sense |
+| 3. Projection & Comparison | Project senses onto shared basis, compute similarity |
+| 4. Clustering | Identify convergent (multi-source) vs source-specific clusters |
+
+### Quick Start
+
+```python
+from sense_explorer import SenseExplorer
+
+# Load two embeddings
+se_wiki = SenseExplorer.from_file("glove-wiki-100d.txt")
+se_twitter = SenseExplorer.from_file("glove-twitter-100d.txt")
+
+# Simple two-way merge
+result = se_wiki.merge_with(se_twitter, "bank")
+print(f"Convergent senses: {result.n_convergent}")
+print(f"Source-specific: {result.n_source_specific}")
+
+# Get detailed analysis
+for cluster_id, info in result.analysis.items():
+    if info['is_convergent']:
+        print(f"Cluster {cluster_id}: CONVERGENT across {info['sources']}")
+    else:
+        print(f"Cluster {cluster_id}: SOURCE-SPECIFIC to {info['sources']}")
+```
+
+### Three-Way Merge (Wiki + Twitter + News)
+
+```python
+from sense_explorer.merger import EmbeddingMerger
+
+# Create merger
+merger = EmbeddingMerger(verbose=True)
+merger.add_embedding("wiki", se_wiki.embeddings)
+merger.add_embedding("twitter", se_twitter.embeddings)
+merger.add_embedding("news", se_news.embeddings)
+
+# Merge senses
+result = merger.merge_senses("bank", n_senses=3, distance_threshold=0.05)
+print(merger.report(result))
+
+# Test multiple thresholds
+results = merger.merge_senses("bank", return_all_thresholds=True)
+for thresh, res in results.items():
+    print(f"{thresh:.2f}: {res.n_clusters} clusters, {res.n_convergent} convergent")
+```
+
+### Threshold Selection
+
+| Threshold | Effect | Use Case |
+|-----------|--------|----------|
+| < 0.03 | Fine-grained | Preserve subtle sense distinctions |
+| 0.03–0.10 | Balanced | Merge equivalent senses (recommended) |
+| > 0.20 | Coarse | Collapse most structure |
+
+### Staged Merger for Large Embeddings
+
+When embeddings are too large to load simultaneously:
+
+```python
+from sense_explorer.staged_merger import StagedMerger, MergeStrategy
+
+# Define embeddings (paths only — not loaded yet)
+specs = {
+    "wiki": {"path": "glove-wiki-300d.txt", "format": "glove"},
+    "twitter": {"path": "glove-twitter-200d.txt", "format": "glove"},
+    "news": {"path": "word2vec-news-300d.bin", "format": "word2vec"},
+    "crawl": {"path": "fasttext-cc-300d.vec", "format": "fasttext"},
+}
+
+# Create merger with memory constraint
+merger = StagedMerger(
+    specs,
+    max_concurrent=2,  # Only 2 embeddings in memory at once
+    strategy=MergeStrategy.AFFINITY  # Merge most similar first
+)
+
+# Plan optimal order (loads only samples)
+plan = merger.plan_merge_order(sample_words=["bank", "rock", "plant"])
+print(plan)
+# Step 1: Load [wiki, twitter] — Highest affinity pair (0.42)
+# Step 2: Load [news] — Best affinity to merged (0.38)
+# Step 3: Load [crawl] — Best affinity to merged (0.31)
+
+# Execute staged merge
+result = merger.merge_staged("bank", n_senses=3)
+print(f"Final: {result.final_result.n_convergent} convergent")
+print(f"Convergence history: {result.convergence_history}")
+```
+
+### Merge Strategies
+
+| Strategy | Description | Best For |
+|----------|-------------|----------|
+| `AFFINITY` | Merge highest-affinity pairs first | General use (recommended) |
+| `ANCHOR` | Start with best-quality embedding | When one embedding is superior |
+| `HIERARCHICAL` | Build dendrogram over embeddings | Research/analysis |
+| `SEQUENTIAL` | User-specified order | Manual control |
+
+### Visualization
+
+```python
+from sense_explorer.merger import plot_merger_dendrogram
+
+result = merger.merge_senses("rock")
+plot_merger_dendrogram(
+    result, 
+    "rock_dendrogram.png",
+    show_threshold_lines=[0.03, 0.05, 0.10]
+)
+```
+
+### MergerResult
+
+```python
+@dataclass
+class MergerResult:
+    word: str
+    sense_components: List[SenseComponent]
+    similarity_matrix: np.ndarray
+    clusters: Dict[str, int]      # sense_id -> cluster_label
+    analysis: Dict[int, Dict]     # cluster_id -> {members, sources, is_convergent, ...}
+    pairwise_stats: Dict          # (sense_i, sense_j) -> {similarity, core_words, ...}
+    threshold_used: float
+
+    # Properties
+    n_clusters: int               # Total clusters
+    n_convergent: int             # Clusters with senses from multiple sources
+    n_source_specific: int        # Clusters with senses from single source
 ```
 
 ## Why Spectral Clustering?
@@ -132,6 +334,90 @@ Spectral clustering validates the **wave superposition view** of meaning:
 ```
 If meanings were points → k-means should suffice
 If meanings are waves   → spectral should excel ✓ CONFIRMED
+```
+
+## Sense Distillation via IVA (v0.9.2)
+
+IVA (Iterative Vector Averaging) **distills** the shared semantic essence from a word set:
+
+```python
+# Full pipeline: SSR separation → IVA distillation
+se = SenseExplorer.from_glove("glove.6B.100d.txt")
+
+# Step 1: Separate senses (SSR)
+senses = se.induce_senses("bank")
+
+# Step 2: Distill each sense's anchors (IVA)
+results = se.distill_senses("bank")
+
+# Check coherence of anchor sets
+coherences = se.measure_anchor_coherence("bank")
+print(coherences)  # {'financial': 0.456, 'river': 0.423}
+
+# Compare SSR vectors with IVA directions
+stats = se.distill_and_compare("bank")
+print(stats['ssr_iva_angles'])      # Angle between SSR and IVA per sense
+print(stats['iva_inter_sense_angles'])  # Angles between distilled directions
+```
+
+### Why Two Modes?
+
+| Mode | Method | Behavior | Use Case |
+|------|--------|----------|----------|
+| **Constrained** | `distill_constrained()` | Iterates only within given word set | Stay cluster-specific (recommended) |
+| **Global** | `distill()` | Iterates over entire vocabulary | May drift to global attractors |
+
+```python
+# Constrained (default, recommended)
+results = se.distill_senses("bank", mode='constrained')
+
+# Global (may capture broader patterns)
+results = se.distill_senses("bank", mode='global')
+```
+
+### Standalone Distiller
+
+For custom word set analysis without SSR:
+
+```python
+# Get distiller from explorer
+distiller = se.get_distiller()
+
+# Distill any word set
+result = distiller.distill_constrained(['money', 'loan', 'account', 'deposit'])
+print(result.direction)    # Unit vector: the distilled concept
+print(result.exemplars)    # Nearest words to the direction
+print(result.coherence)    # Input set coherence (0-1)
+print(result.n_iterations) # Convergence speed
+
+# Or use standalone function
+from sense_explorer.distillation import distill_concept, measure_set_coherence
+
+result = distill_concept(embeddings, ['money', 'loan', 'account'])
+coherence = measure_set_coherence(embeddings, ['money', 'loan', 'account'])
+```
+
+### Coherence Reference Values
+
+| Word Set Type | Coherence |
+|---------------|-----------|
+| Random words | ~0.15 |
+| Topically related | ~0.30-0.40 |
+| Sense-coherent groups | ~0.45-0.55 |
+| Near-synonyms | ~0.60-0.80 |
+
+The coherence metric validates the "garbage in, garbage out" principle:
+meaningful input → structured output; random input → noise.
+
+### Batch Validation
+
+```python
+# Validate across multiple words
+stats = se.validate_sense_distillation(['bank', 'crane', 'bat', 'mouse'])
+
+print(f"Mean coherence: {stats['mean_coherence']:.3f}")
+print(f"Mean SSR↔IVA angle: {stats['mean_ssr_iva_angle']:.1f}°")
+print(f"Mean inter-sense angle: {stats['mean_inter_sense_angle']:.1f}°")
 ```
 
 ## Polarity Classification (97% Accuracy)
@@ -169,225 +455,38 @@ pf.find_polar_opposites("happy")
 | `size` | big, large, huge | small, tiny, little |
 | `temperature` | hot, warm | cold, freezing |
 
-## Sense Geometry Analysis (NEW in v0.9.0)
+## Sense Geometry Analysis (v0.9.0)
 
-Analyze the geometric structure of separated senses — how sense vectors are arranged around a polysemous word vector:
+Analyze the geometric structure of separated senses:
 
 ```python
-# Single word: decompose and analyze
+# Localize senses and get full decomposition
 decomp = se.localize_senses("bank")
-print(f"R² = {decomp.variance_explained_total:.3f}")
-print(f"Dominant sense: {decomp.dominant_sense}")
-print(f"Coefficient ratio: {decomp.coefficient_ratio:.1f}:1")
 
-# Inter-sense angles
-for s1, s2, angle in decomp.angle_pairs:
-    print(f"  ∠({s1}, {s2}) = {angle:.1f}°")
+print(decomp.variance_explained_total)  # R² — how well senses explain the word
+print(decomp.coefficients)              # Mixing weights α per sense
+print(decomp.angle_pairs)               # Inter-sense angles
 
-# JSON-serializable summary
-print(decomp.summary_dict())
+# Generate visualizations
+se.plot_sense_dashboard("bank", "bank_analysis.png")
 
-# Batch analysis across multiple words
-results = se.analyze_geometry(
-    ["bank", "cell", "run", "take"],
-    save_dir="geometry_output"  # Saves dashboards + summary plots
-)
-
-# Work with pre-extracted sense vectors
-from sense_explorer.geometry import decompose
-decomp = decompose("bank", word_vec, {"financial": vec1, "river": vec2})
+# Batch analysis
+results = se.analyze_geometry(["bank", "cell", "crane"])
 ```
 
-### Key Finding: Molecular Bond Analogy
+**Key finding**: Inter-sense angles cluster around ~48° (median at 100d), suggesting a characteristic "packing angle" for meanings — formally analogous to molecular bond geometry.
 
-Inter-sense angles cluster around a **characteristic scale** (~48° median at 100d), analogous to molecular bond angles:
+## How It Works
 
-| Relationship | Typical angle |
-|---|---|
-| Synonyms / same-sense words | < 30° |
-| **Different senses of the same word** | **~35–55° (median ~48°)** |
-| Unrelated words | ~90° |
-
-This arises from a **force balance**: context distinctness pushes senses apart (like electron repulsion), while word identity pulls them together (like covalent attraction). The ~48° equilibrium is to distributional semantics what 109.5° is to carbon chemistry.
-
-### Visualizations
-
-`localize_senses()` and `analyze_geometry()` can generate:
-- **Molecular diagrams**: Sense vectors radiating from the word vector at true angles
-- **Dimension attribution maps**: Which sense "owns" each embedding dimension
-- **Interference heatmaps**: Constructive vs. destructive sense interaction
-- **Cross-word comparison grids**: Side-by-side geometry across words
-- **Angle summary bar charts**: All inter-sense angles at a glance
-
-```python
-# Save a full dashboard for one word
-from sense_explorer.geometry import plot_word_dashboard
-plot_word_dashboard(decomp, "bank_dashboard.png")
-
-# Or save everything at once
-results = se.analyze_geometry(["bank", "cell", "run"], save_dir="output/")
-```
-
-## The Modes Explained
-
-### 1. Unsupervised Discovery (`discover_senses`)
-
-True sense discovery from distributional data alone:
-- **Spectral clustering** (default): 90% accuracy at 50d
-- Uses eigengap for automatic k selection
-- Generic sense names (`sense_0`, `sense_1`, ...)
-
-```python
-# Spectral (default, recommended)
-senses = se.discover_senses("bank", n_senses=2)
-
-# Or explicitly specify method
-senses = se.discover_senses("bank", n_senses=2, clustering_method='spectral')
-senses = se.discover_senses("bank", n_senses=2, clustering_method='xmeans')
-senses = se.discover_senses("bank", n_senses=2, clustering_method='kmeans')
-```
-
-### 1b. Parameter-Free Discovery (`discover_senses_auto`)
-
-Automatic sense count via eigengap (spectral) or BIC (X-means):
-- No need to specify `n_senses`!
-- Spectral uses eigengap heuristic
-- X-means uses Bayesian Information Criterion
-
-```python
-# Spectral + eigengap (default, recommended)
-senses = se.discover_senses_auto("bank")
-print(f"Found {len(senses)} senses")  # Automatically determined!
-
-# Or use X-means + BIC
-senses = se.discover_senses_auto("bank", clustering_method='xmeans')
-```
-
-### 2. WordNet-Guided Separation (`separate_senses_wordnet`) — NEW in v0.9.1
-
-Bridges unsupervised discovery and supervised induction. WordNet provides structural guidance (which senses to look for), while embedding geometry determines which senses the corpus actually supports:
-
-- Automatically derives anchors from WordNet synsets (lemmas, hyponyms, hypernyms, glosses)
-- Filters for embedding vocabulary presence
-- Merges synsets whose anchor centroids overlap in embedding space (cosine > threshold)
-- Sense names are WordNet synset names (e.g., `depository_financial_institution.n.01`)
-- The gap between unsupervised and WordNet-guided results measures corpus–lexicon mismatch
-
-```python
-# Basic usage — let geometry decide what survives
-senses = se.separate_senses_wordnet("bank")
-print(senses.keys())
-# e.g. dict_keys(['depository_financial_institution.n.01', 'bank.n.01'])
-
-# With full diagnostics
-senses, details = se.separate_senses_wordnet("bank", return_details=True)
-print(f"WordNet has {details['n_synsets_total']} synsets")
-print(f"After merging: {details['n_groups_after_merge']} distinct groups")
-print(f"Merge history: {details['merge_history']}")  # Which synsets collapsed
-
-# Tune merge aggressiveness
-senses = se.separate_senses_wordnet("bank", merge_threshold=0.60)  # More merging
-senses = se.separate_senses_wordnet("bank", merge_threshold=0.85)  # Preserve more distinctions
-
-# Restrict to nouns only
-senses = se.separate_senses_wordnet("bank", pos_filter='n')
-```
-
-**How merging works**: WordNet lists 18 synsets for "bank". Many are too similar in embedding space to separate (e.g., `bank.v.03` "do business with a bank" vs. `bank.v.05` "be in the banking business"). The algorithm iteratively merges the most similar pair until all remaining groups are geometrically distinct. The `merge_threshold` parameter controls this — at 0.70 (default), only groups with cosine similarity < 0.70 survive as separate senses.
-
-### 3. Weakly Supervised Induction (`induce_senses`)
-
-Knowledge-guided sense induction:
-- Uses FrameNet frames or WordNet glosses as anchors
-- Senses induced toward anchor-defined targets
-- Meaningful sense names (`financial`, `river`, ...)
-- ~88% accuracy
-- Automatic anchor validation warns about low-quality anchors
-
-```python
-senses = se.induce_senses("bank")
-
-# Or provide custom anchors
-senses = se.induce_senses("bank", anchors={
-    "financial": ["money", "account", "loan"],
-    "river": ["water", "shore", "stream"]
-})
-
-# Check anchor quality before induction
-quality = se._validate_anchors("bank", {
-    "financial": ["money", "account", "loan"],
-    "river": ["water", "shore", "stream"]
-})
-# Returns per-sense coherence, separation, relevance, and quality rating
-
-# Standalone quality assessment (without full SenseExplorer)
-from sense_explorer import HybridAnchorExtractor
-extractor = HybridAnchorExtractor(vocab)
-anchors, source = extractor.extract("bank")
-report = extractor.assess_quality("bank", anchors, embeddings_norm=emb_norm)
-print(report['overall'])  # 'good', 'fair', or 'poor'
-```
-
-### 4. Supervised Polarity (`get_polarity`)
-
-Polarity classification with seed supervision:
-- Requires positive/negative seed words
-- Projects words onto polarity axis
-- Binary classification with confidence
-- ~97% accuracy
-
-```python
-polarity = se.get_polarity("terrible")
-# {'polarity': 'negative', 'score': -0.71, 'confidence': 0.88}
-```
-
-## Theoretical Background
-
-### The Supervision Continuum
-
-All modes share the same attractor-following mechanism but differ in where guidance comes from:
+The self-repair mechanism was inspired by DNA repair:
 
 ```
-Fully Unsupervised    Knowledge-Guided    Weakly Supervised    Fully Supervised    Post-Analysis
-       │                     │                    │                   │                  │
-  discover_senses()   separate_senses     induce_senses()     get_polarity()   localize_senses()
-  discover_senses      _wordnet()                                               analyze_geometry()
-    _auto()                  │                    │                   │                  │
-       │              WordNet synsets        Anchor targets       Seed labels     Sense vectors →
-   No targets         as structural          88% accuracy        97% accuracy    Geometry analysis
-   90% accuracy       hints; geometry
-   (spectral)         filters what
-       │              corpus supports
-  Eigengap: auto k          │
-  (parameter-free!)   Synset merging:
-                      geometry has
-                      the final word
+1. START:    word embedding w (polysemous: river-bank + money-bank superposed)
+2. NOISE:    create N noisy copies: w₁, w₂, ..., wₙ
+3. SEED:     bias subsets toward different senses via anchor centroids
+4. ITERATE:  let copies self-organize toward stable attractors
+5. RESULT:   copies cluster around distinct sense embeddings
 ```
-
-The comparison between modes is itself informative: the gap between `discover_senses_auto` and `separate_senses_wordnet` for the same word directly measures how well the corpus-encoded sense structure aligns with lexicographic sense inventories.
-
-### Why Spectral Clustering Works
-
-The eigengap criterion answers "how many senses?" the same way spectral analysis answers "how many frequencies?":
-
-```
-Eigenvalues:  λ₁ ─ λ₂ ─ λ₃ │ λ₄ ─ λ₅ ─ λ₆
-                           │
-              connected    GAP    separate
-              (same sense)  ↓     (different senses)
-                          k = 3
-```
-
-X-means (BIC) fails at low dimensions because it assumes Gaussian clusters. Spectral clustering examines graph connectivity, which persists even when geometric separation fails.
-
-### DNA Self-Repair Analogy
-
-All modes on the supervision continuum — discovery, WordNet-guided separation, and induction — use the same mechanism:
-1. **Damage** (noise injection): Perturb the embedding
-2. **Repair** (self-organization): Settle into stable configurations
-3. **Diagnosis** (attractor identification): Observe attractor basins
-
-What differs is the **source of attractors**: spectral clustering discovers them from geometry, WordNet synsets derive them from lexicographic structure, and user-provided anchors define them directly. The mechanism is the same — attractor-following — and the algorithm is agnostic to where the attractors come from.
 
 Critically, the algorithm is **attractor-following**, not space-sampling. Anchor centroids define deterministic attractors, and seeded copies converge to those attractors regardless of how many copies (N) are created. This explains why:
 
@@ -430,6 +529,13 @@ SenseExplorer(
 | `discover_senses_auto(word)` | Unsupervised | Parameter-free discovery (eigengap) |
 | `separate_senses_wordnet(word)` | Knowledge-guided | WordNet synset-guided separation |
 | `induce_senses(word)` | Weakly supervised | Anchor-guided induction |
+| `distill_senses(word)` | Distillation | IVA distillation of sense anchors |
+| `distill_and_compare(word)` | Distillation | Compare SSR↔IVA directions |
+| `measure_anchor_coherence(word)` | Distillation | Check anchor set quality |
+| `get_distiller()` | Distillation | Get standalone IVADistiller |
+| `merge_with(other, word)` | Cross-embedding | Merge senses with another embedding (NEW) |
+| `get_merger(others)` | Cross-embedding | Get EmbeddingMerger for N embeddings (NEW) |
+| `extract_sense_components(word)` | Cross-embedding | Export senses for external merger (NEW) |
 | `localize_senses(word)` | Geometry | Decompose word vector into sense components |
 | `analyze_geometry(words)` | Geometry | Batch cross-word geometry analysis |
 | `_validate_anchors(word, anchors)` | Diagnostic | Check anchor quality before induction |
@@ -456,6 +562,123 @@ se.separate_senses_wordnet(
 ```
 
 **`merge_threshold` tuning**: At 0.70 (default), synsets with centroid cosine similarity ≥ 0.70 merge. Lower values (0.50–0.60) produce fewer, coarser senses; higher values (0.80–0.90) preserve more of WordNet's granularity. The comparison across thresholds reveals the granularity structure of the embedding space.
+
+### Sense Distillation (IVA)
+
+```python
+from sense_explorer.distillation import (
+    IVADistiller,
+    DistillationResult,
+    distill_concept,
+    measure_set_coherence,
+    validate_distillation,
+)
+
+# Create distiller
+distiller = IVADistiller(
+    embeddings,                    # Dict[str, np.ndarray]
+    max_iter=50,                   # Maximum iterations
+    convergence_threshold=0.9999,  # Cosine threshold for convergence
+    top_k_neighbors=50,            # Neighbors for global mode
+    verbose=False
+)
+
+# Distill a word set (constrained — recommended)
+result = distiller.distill_constrained(words, n_exemplars=5)
+# Returns: DistillationResult with direction, exemplars, coherence
+
+# Distill a word set (global — may drift)
+result = distiller.distill(words, n_exemplars=5)
+
+# Distill multiple groups at once
+results = distiller.distill_multiple(
+    {'financial': ['money', 'loan'], 'river': ['water', 'shore']},
+    mode='constrained'
+)
+
+# Convenience functions
+result = distill_concept(embeddings, words, mode='constrained')
+coherence = measure_set_coherence(embeddings, words)
+```
+
+### DistillationResult
+
+```python
+@dataclass
+class DistillationResult:
+    direction: np.ndarray    # Unit vector: the distilled concept
+    exemplars: List[str]     # Nearest words to direction
+    coherence: float         # Input set coherence (0-1)
+    input_words: List[str]   # Words used for distillation
+    n_iterations: int        # Iterations until convergence
+    mode: str                # 'global' or 'constrained'
+```
+
+### Embedding Merger
+
+```python
+from sense_explorer.merger import (
+    EmbeddingMerger,
+    SenseComponent,
+    MergerResult,
+    MergerBasis,
+    create_merger_from_explorers,
+    merge_with_ssr,
+    plot_merger_dendrogram,
+)
+
+# Create merger
+merger = EmbeddingMerger(
+    neighbor_k=50,           # Neighbors for basis construction
+    max_basis_size=40,       # Maximum merger basis size
+    default_threshold=0.05,  # Default clustering threshold
+    verbose=True
+)
+
+# Add embeddings
+merger.add_embedding("wiki", wiki_vectors)
+merger.add_embedding("twitter", twitter_vectors)
+
+# Merge senses
+result = merger.merge_senses(
+    word,
+    sense_components=None,        # Optional: pre-extracted senses
+    n_senses=3,                   # Senses per embedding (if not provided)
+    distance_threshold=0.05,      # Clustering threshold
+    return_all_thresholds=False,  # Test multiple thresholds
+)
+
+# From SenseExplorer instances
+merger = create_merger_from_explorers({"wiki": se_wiki, "twitter": se_twitter})
+
+# With SSR sense extraction
+result = merge_with_ssr({"wiki": se_wiki, "twitter": se_twitter}, "bank")
+```
+
+### Staged Merger (for large embeddings)
+
+```python
+from sense_explorer.staged_merger import (
+    StagedMerger,
+    MergeStrategy,
+    MergePlan,
+    StagedMergeResult,
+)
+
+# Create staged merger
+merger = StagedMerger(
+    embedding_specs,          # {name: {"path": ..., "format": ...}}
+    max_concurrent=2,         # Memory constraint
+    strategy=MergeStrategy.AFFINITY,
+    verbose=True
+)
+
+# Plan optimal merge order
+plan = merger.plan_merge_order(sample_words=["bank", "rock"])
+
+# Execute staged merge
+result = merger.merge_staged(word, n_senses=3)
+```
 
 ### Spectral Clustering Functions
 
@@ -530,8 +753,25 @@ plot_cross_word_comparison([decomp1, decomp2], "comparison.png")
 plot_angle_summary([decomp1, decomp2, decomp3], "angles.png")
 ```
 
+## Package Structure
+
+```
+sense_explorer/
+├── __init__.py           # Package exports
+├── core.py               # SenseExplorer main class (SSR)
+├── spectral.py           # Spectral clustering + eigengap
+├── geometry.py           # Sense decomposition + visualization
+├── anchor_extractor.py   # FrameNet/WordNet anchor extraction
+├── polarity.py           # Polarity classification
+├── distillation.py       # IVA concept distillation
+├── merger.py             # Embedding merger (NEW)
+└── staged_merger.py      # Memory-efficient staged merger (NEW)
+```
+
 ## Version History
 
+- **v0.9.3**: Embedding merger (`merge_with`, `get_merger`), N-way embedding combination, staged merger for large embeddings (`StagedMerger`), affinity-based merge ordering, convergent vs source-specific sense identification, merger dendrograms
+- **v0.9.2**: Sense distillation via IVA (`distill_senses`, `get_distiller`), constrained/global modes, anchor coherence measurement, SSR↔IVA comparison, `DistillationResult` dataclass, `validate_sense_distillation()` batch analysis
 - **v0.9.1**: WordNet-guided sense separation (`separate_senses_wordnet`), synset anchor extraction with hyponym drill-down, iterative synset merging by centroid similarity, `explore_senses(mode='wordnet')`, `--method wordnet` CLI support, cache-busting `force` parameter for sweep/oversplit operations
 - **v0.9.0**: Sense geometry module (`localize_senses`, `analyze_geometry`), `SenseDecomposition` dataclass, molecular diagrams, cross-word batch analysis
 - **v0.8.0**: Attractor-following insight, anchor validation, n_copies 100→30, vectorized self-repair, `assess_quality()`
@@ -545,6 +785,13 @@ plot_angle_summary([decomp1, decomp2, decomp3], "angles.png")
 ```bibtex
 @article{kuroda2026sense,
   title={Sense separation: From sense mining to sense induction via simulated self-repair over word embeddings},
+  author={Kuroda, Kow and Claude},
+  journal={arXiv preprint},
+  year={2026}
+}
+
+@article{kuroda2026merger,
+  title={Merging embeddings through sense separation: Constructing unified semantic space from multiple word embeddings via sense alignment},
   author={Kuroda, Kow and Claude},
   journal={arXiv preprint},
   year={2026}
