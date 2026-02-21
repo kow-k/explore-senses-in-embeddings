@@ -10,11 +10,12 @@ space-sampling. Anchor centroids define deterministic attractors—success
 depends on anchor quality, not the number of noisy copies (N). Even N=3
 achieves perfect separation when anchors are good.
 
-Five capabilities on the supervision continuum:
+Six capabilities on the supervision continuum:
   - discover_senses_auto():      Unsupervised - spectral clustering (90% at 50d)
   - discover_senses():           Semi-supervised - user specifies k
   - separate_senses_wordnet():   WordNet-guided - lexicographic structure + geometry
   - induce_senses():             Weakly supervised - anchor-guided (88% accuracy)
+  - merge_with():                Cross-embedding - combine sense inventories (NEW)
   - find_polarity():             Supervised - polarity classification (97% accuracy)
 
 Basic Usage:
@@ -31,6 +32,11 @@ Basic Usage:
     # Knowledge-guided induction (88% accuracy)
     >>> senses = se.induce_senses("bank")
     
+    # Cross-embedding merger (NEW in v0.9.3)
+    >>> se_twitter = SenseExplorer.from_glove("glove.twitter.100d.txt")
+    >>> result = se.merge_with(se_twitter, "bank")
+    >>> print(f"Convergent: {result.n_convergent}")
+    
     # Polarity classification (97% accuracy)
     >>> polarity = se.get_polarity("excellent")
 
@@ -40,7 +46,7 @@ Basic Usage:
 
 Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
 License: MIT
-Version: 0.9.1
+Version: 0.9.3
 """
 
 from .core import (
@@ -85,7 +91,35 @@ from .geometry import (
     plot_angle_summary,
 )
 
-__version__ = "0.9.1"
+# Embedding merger (NEW in v0.9.3)
+try:
+    from .merger import (
+        EmbeddingMerger,
+        SenseComponent,
+        MergerResult,
+        MergerBasis,
+        create_merger_from_explorers,
+        merge_with_ssr,
+        plot_merger_dendrogram,
+    )
+    MERGER_AVAILABLE = True
+except ImportError:
+    MERGER_AVAILABLE = False
+
+# Staged merger for large embeddings (NEW in v0.9.3)
+try:
+    from .staged_merger import (
+        StagedMerger,
+        MergeStrategy,
+        MergePlan,
+        StagedMergeResult,
+        quick_staged_merge,
+    )
+    STAGED_MERGER_AVAILABLE = True
+except ImportError:
+    STAGED_MERGER_AVAILABLE = False
+
+__version__ = "0.9.3"
 __author__ = "Kow Kuroda & Claude"
 __all__ = [
     # Core
@@ -121,3 +155,24 @@ __all__ = [
     'plot_cross_word_comparison',
     'plot_angle_summary',
 ]
+
+# Add merger exports if available
+if MERGER_AVAILABLE:
+    __all__.extend([
+        'EmbeddingMerger',
+        'SenseComponent',
+        'MergerResult',
+        'MergerBasis',
+        'create_merger_from_explorers',
+        'merge_with_ssr',
+        'plot_merger_dendrogram',
+    ])
+
+if STAGED_MERGER_AVAILABLE:
+    __all__.extend([
+        'StagedMerger',
+        'MergeStrategy',
+        'MergePlan',
+        'StagedMergeResult',
+        'quick_staged_merge',
+    ])

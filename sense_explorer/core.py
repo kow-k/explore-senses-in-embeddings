@@ -9,15 +9,17 @@ in static embeddings (GloVe, Word2Vec, FastText, etc.).
 Inspired by DNA self-repair mechanisms: noise + self-organization
 reveals latent sense structure encoded as stable attractors.
 
-Four operational modes on the supervision continuum:
+Five operational modes on the supervision continuum:
   - discover_senses_auto(): UNSUPERVISED - geometry decides k and content
   - discover_senses():      SEMI-SUPERVISED - geometry decides content, user decides k
   - separate_senses_wordnet(): WORDNET-GUIDED - lexicographic guidance + geometric filtering
   - induce_senses():        WEAKLY SUPERVISED - anchor-guided induction (88%)
+  - merge_with():           CROSS-EMBEDDING - combine sense inventories (NEW in v0.9.3)
 
 The key insight: Senses can be DISCOVERED (emerging from distributional
 structure), SEPARATED under lexicographic guidance (WordNet synsets as
-structural hints), or INDUCED (guided toward anchor-defined targets).
+structural hints), INDUCED (guided toward anchor-defined targets), or
+MERGED across multiple embeddings (combining sense inventories).
 All use the same self-repair mechanism but differ in supervision level.
 
 Basic Usage:
@@ -33,13 +35,18 @@ Basic Usage:
   
   # Weakly supervised induction
   >>> senses = se.induce_senses("bank")
+  
+  # Cross-embedding merger (NEW in v0.9.3)
+  >>> se_twitter = SenseExplorer.from_file("glove.twitter.100d.txt")
+  >>> result = se.merge_with(se_twitter, "bank")
+  >>> print(f"Convergent: {result.n_convergent}")
 
 Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
 License: MIT
 Repository: https://github.com/kow-k/sense-explorer
 """
 
-__version__ = "0.9.1"
+__version__ = "0.9.3"
 __author__ = "Kow Kuroda & Claude"
 
 import numpy as np
@@ -89,6 +96,19 @@ try:
     WORDNET_AVAILABLE = True
 except ImportError:
     WORDNET_AVAILABLE = False
+
+# Import embedding merger module (NEW in v0.9.3)
+try:
+    from .merger import (
+        EmbeddingMerger,
+        SenseComponent,
+        MergerResult,
+        create_merger_from_explorers,
+        merge_with_ssr,
+    )
+    MERGER_AVAILABLE = True
+except ImportError:
+    MERGER_AVAILABLE = False
 
 
 # =============================================================================
@@ -2443,6 +2463,175 @@ class SenseExplorer:
             negative_seeds=negative_seeds,
             verbose=self.verbose
         )
+    
+    # =========================================================================
+    # Embedding Merger Methods (NEW in v0.9.3)
+    # =========================================================================
+    
+    def get_merger(
+        self,
+        other_explorers: Dict[str, 'SenseExplorer'] = None,
+        **kwargs
+    ) -> 'EmbeddingMerger':
+        """
+        Get an EmbeddingMerger configured with this explorer's embeddings.
+        
+        Args:
+            other_explorers: Additional SenseExplorer instances to include.
+                             Dict mapping names to explorers.
+            **kwargs: Additional arguments for EmbeddingMerger
+        
+        Returns:
+            Configured EmbeddingMerger
+            
+        Example:
+            >>> se_wiki = SenseExplorer.from_file("wiki.txt")
+            >>> se_twitter = SenseExplorer.from_file("twitter.txt")
+            >>> 
+            >>> # Get merger from wiki, adding twitter
+            >>> merger = se_wiki.get_merger({"twitter": se_twitter})
+            >>> result = merger.merge_senses("bank")
+        """
+        if not MERGER_AVAILABLE:
+            raise ImportError(
+                "Merger module not available. "
+                "Ensure merger.py is in the sense_explorer package."
+            )
+        
+        merger = EmbeddingMerger(verbose=self.verbose, **kwargs)
+        merger.add_embedding("self", self.embeddings)
+        
+        if other_explorers:
+            for name, se in other_explorers.items():
+                merger.add_embedding(name, se.embeddings)
+        
+        return merger
+    
+    def merge_with(
+        self,
+        other: 'SenseExplorer',
+        word: str,
+        other_name: str = "other",
+        self_name: str = "self",
+        n_senses: int = None,
+        use_ssr: bool = True,
+        distance_threshold: float = 0.05
+    ) -> 'MergerResult':
+        """
+        Merge senses of a word with another embedding.
+        
+        This is a convenience method for two-embedding merger.
+        For more control or more embeddings, use get_merger().
+        
+        Args:
+            other: Another SenseExplorer instance
+            word: Word to merge
+            other_name: Name for the other embedding (for labeling)
+            self_name: Name for this embedding (for labeling)
+            n_senses: Number of senses to extract (None = auto)
+            use_ssr: If True, use SSR for sense extraction; else use k-means
+            distance_threshold: Clustering threshold
+            
+        Returns:
+            MergerResult with convergent and source-specific senses
+            
+        Example:
+            >>> se_wiki = SenseExplorer.from_file("wiki.txt")
+            >>> se_twitter = SenseExplorer.from_file("twitter.txt")
+            >>> 
+            >>> result = se_wiki.merge_with(se_twitter, "bank")
+            >>> print(f"Convergent senses: {result.n_convergent}")
+            >>> print(f"Source-specific: {result.n_source_specific}")
+        """
+        if not MERGER_AVAILABLE:
+            raise ImportError(
+                "Merger module not available. "
+                "Ensure merger.py is in the sense_explorer package."
+            )
+        
+        if use_ssr:
+            # Use SSR-based extraction
+            return merge_with_ssr(
+                {self_name: self, other_name: other},
+                word,
+                n_senses=n_senses,
+                distance_threshold=distance_threshold,
+                verbose=self.verbose
+            )
+        else:
+            # Use simple k-means extraction
+            merger = EmbeddingMerger(verbose=self.verbose)
+            merger.add_embedding(self_name, self.embeddings)
+            merger.add_embedding(other_name, other.embeddings)
+            return merger.merge_senses(
+                word, 
+                n_senses=n_senses or 3,
+                distance_threshold=distance_threshold
+            )
+    
+    def extract_sense_components(
+        self,
+        word: str,
+        source_name: str = None,
+        n_senses: int = None
+    ) -> List['SenseComponent']:
+        """
+        Extract sense components in a format suitable for embedding merger.
+        
+        Uses SSR (induce_senses) for extraction, then wraps results
+        in SenseComponent dataclass for use with EmbeddingMerger.
+        
+        Args:
+            word: Target word
+            source_name: Name for this embedding source
+            n_senses: Number of senses (None = auto via eigengap)
+            
+        Returns:
+            List of SenseComponent objects
+            
+        Example:
+            >>> # Extract from multiple explorers
+            >>> components = []
+            >>> components.extend(se_wiki.extract_sense_components("bank", "wiki"))
+            >>> components.extend(se_twitter.extract_sense_components("bank", "twitter"))
+            >>> 
+            >>> # Use with merger
+            >>> merger = EmbeddingMerger()
+            >>> merger.add_embedding("wiki", se_wiki.embeddings)
+            >>> merger.add_embedding("twitter", se_twitter.embeddings)
+            >>> result = merger.merge_senses("bank", sense_components=components)
+        """
+        if not MERGER_AVAILABLE:
+            raise ImportError(
+                "Merger module not available. "
+                "Ensure merger.py is in the sense_explorer package."
+            )
+        
+        if source_name is None:
+            source_name = "source"
+        
+        # Use SSR to get sense vectors
+        senses = self.induce_senses(word, n_senses=n_senses)
+        
+        components = []
+        for sense_name, sense_vec in senses.items():
+            # Compute neighbors
+            neighbors = []
+            for w in self.embeddings:
+                if w != word:
+                    sim = float(np.dot(sense_vec, self._embeddings_norm.get(w, self.embeddings[w])))
+                    neighbors.append((w, sim))
+            neighbors.sort(key=lambda x: -x[1])
+            
+            components.append(SenseComponent(
+                word=word,
+                sense_id=f"{source_name}_{sense_name}",
+                vector=sense_vec,
+                source=source_name,
+                top_neighbors=neighbors[:50]
+            ))
+        
+        return components
     
     def __repr__(self) -> str:
         return f"SenseExplorer(vocab_size={self.vocab_size:,}, dim={self.dim}, cached_senses={len(self._sense_cache)})"
