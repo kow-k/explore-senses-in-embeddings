@@ -27,13 +27,21 @@ Clustering Methods:
     - 'spectral': Pure spectral clustering with eigengap k-selection
     - 'spectral_hierarchical': Hybrid (recommended) — wave-aware + dendrograms
 
-Quality-Based Weighting (NEW in v0.3.0):
-    The merger now supports quality-based weighting of embedding sources.
+Quality-Based Weighting (v0.3.0):
+    The merger supports quality-based weighting of embedding sources.
     Weights are computed from:
     - Vocabulary size (log-scaled)
     - Anchor coherence (from IVA distillation)
     - Sense separation quality (R² from geometry)
     - Vocabulary overlap (shared words)
+
+Convergence Validation (v0.4.0):
+    Validate whether senses that cluster together truly represent the same
+    meaning across embeddings. Methods include:
+    - Neighbor overlap (Jaccard similarity)
+    - Anchor consistency
+    - Cross-embedding projection
+    - Semantic coherence scoring
 
 Basic Usage:
     ```python
@@ -67,6 +75,17 @@ Weighted Merge (Recommended):
     print(f"Convergent: {result.n_convergent}")
     ```
 
+Convergence Validation:
+    ```python
+    from sense_explorer.merger import merge_with_weights, validate_convergence
+    
+    result = merge_with_weights({"wiki": se_wiki, "twitter": se_twitter}, "bank")
+    report = validate_convergence(result, {"wiki": se_wiki, "twitter": se_twitter})
+    
+    print(report.summary())
+    print(f"Low confidence clusters: {report.low_confidence_clusters}")
+    ```
+
 Convenience Methods (on SenseExplorer):
     ```python
     # Two-way merge via SenseExplorer method
@@ -92,7 +111,7 @@ For Large Embeddings (Staged Merger):
 
 Author: Kow Kuroda & Claude (Anthropic)
 License: MIT
-Version: 0.3.0
+Version: 0.4.0
 """
 
 from .embedding_merger import (
@@ -114,8 +133,8 @@ from .embedding_merger import (
     # Integration functions
     create_merger_from_explorers,
     merge_with_ssr,
-    merge_with_weights,  # NEW: Quality-weighted merge
-    weighted_report,     # NEW: Report for weighted results
+    merge_with_weights,  # Quality-weighted merge
+    weighted_report,     # Report for weighted results
     
     # Visualization
     plot_merger_dendrogram,
@@ -143,6 +162,57 @@ from .embedding_weights import (
     quick_assess,
 )
 
+from .convergence_validation import (
+    # Data classes
+    SenseValidation,
+    ClusterValidation,
+    ConvergenceReport,
+    
+    # Main validation function
+    validate_convergence,
+    
+    # Individual metrics
+    compute_neighbor_overlap,
+    compute_anchor_consistency,
+    compute_cross_projection_match,
+    compute_semantic_coherence,
+    compute_confidence,
+    
+    # Convenience functions
+    quick_validate,
+    validate_multiple,
+    summarize_validations,
+)
+
+from .register_profiles import (
+    # Data classes
+    SensePrevalence,
+    RegisterNeighbors,
+    SenseDrift,
+    RegisterSignature,
+    RegisterProfile,
+    RegisterSpecificityCluster,
+    RegisterSpecificityAnalysis,
+    
+    # Main functions
+    create_register_profile,
+    compare_registers,
+    summarize_register_comparison,
+    cluster_by_register_specificity,
+    analyze_register_specificity,
+    
+    # Individual analysis functions
+    compute_sense_prevalence,
+    compute_register_neighbors,
+    compute_sense_drift,
+    compute_register_signatures,
+    
+    # Visualization
+    plot_register_profile,
+    plot_register_specificity,
+    plot_register_specificity_detailed,
+)
+
 from .staged_embedding_merger import (
     # Main class
     StagedMerger,
@@ -160,7 +230,7 @@ from .staged_embedding_merger import (
     quick_staged_merge,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.5.0"
 __author__ = "Kow Kuroda & Claude"
 
 __all__ = [
@@ -176,12 +246,12 @@ __all__ = [
     'plot_merger_dendrogram',
     'plot_spectral_analysis',
     
-    # Weighted merger (NEW)
+    # Weighted merger
     'WeightedMergerResult',
     'merge_with_weights',
     'weighted_report',
     
-    # Quality assessment (NEW)
+    # Quality assessment
     'EmbeddingQualityAssessor',
     'EmbeddingQuality',
     'SenseQuality',
@@ -190,6 +260,41 @@ __all__ = [
     'compute_weighted_centroid',
     'weight_similarity_matrix',
     'quick_assess',
+    
+    # Convergence validation (NEW)
+    'SenseValidation',
+    'ClusterValidation',
+    'ConvergenceReport',
+    'validate_convergence',
+    'compute_neighbor_overlap',
+    'compute_anchor_consistency',
+    'compute_cross_projection_match',
+    'compute_semantic_coherence',
+    'compute_confidence',
+    'quick_validate',
+    'validate_multiple',
+    'summarize_validations',
+    
+    # Register profiles (NEW)
+    'SensePrevalence',
+    'RegisterNeighbors',
+    'SenseDrift',
+    'RegisterSignature',
+    'RegisterProfile',
+    'RegisterSpecificityCluster',
+    'RegisterSpecificityAnalysis',
+    'create_register_profile',
+    'compare_registers',
+    'summarize_register_comparison',
+    'cluster_by_register_specificity',
+    'analyze_register_specificity',
+    'compute_sense_prevalence',
+    'compute_register_neighbors',
+    'compute_sense_drift',
+    'compute_register_signatures',
+    'plot_register_profile',
+    'plot_register_specificity',
+    'plot_register_specificity_detailed',
     
     # Spectral analysis
     'compute_laplacian_spectrum',

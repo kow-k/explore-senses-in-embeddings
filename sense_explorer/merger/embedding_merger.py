@@ -1354,7 +1354,8 @@ def merge_with_weights(
     explorers: Dict[str, 'SenseExplorer'],
     word: str,
     n_senses: int = None,
-    distance_threshold: float = 0.05,
+    distance_threshold: float = None,
+    similarity_threshold: float = None,
     clustering_method: str = 'spectral_hierarchical',
     weight_config: Dict[str, float] = None,
     assessment_words: List[str] = None,
@@ -1373,7 +1374,14 @@ def merge_with_weights(
         explorers: Dict mapping names to SenseExplorer instances
         word: Target word to merge
         n_senses: Number of senses per embedding (None = auto)
-        distance_threshold: Clustering threshold
+        distance_threshold: Maximum linkage distance for clustering (default: 0.05).
+            Higher values = more permissive clustering = more convergent clusters.
+            Range: 0.0 to 2.0 (distance = 1 - similarity, so 0.05 means 95% similarity required)
+            NOTE: This is counterintuitive - use similarity_threshold for more intuitive control.
+        similarity_threshold: Minimum similarity for clustering (alternative to distance_threshold).
+            Higher values = stricter clustering = fewer convergent clusters.
+            Range: 0.0 to 1.0 (e.g., 0.3 means 30% similarity required to cluster together)
+            If both are provided, similarity_threshold takes precedence.
         clustering_method: 'hierarchical', 'spectral', or 'spectral_hierarchical'
         weight_config: Custom weights for quality components:
             {'vocab': 0.15, 'coherence': 0.35, 'separation': 0.35, 'overlap': 0.15}
@@ -1385,16 +1393,34 @@ def merge_with_weights(
         
     Example:
         ```python
+        # Using similarity_threshold (intuitive: higher = stricter)
         result = merge_with_weights(
             {"wiki": se_wiki, "twitter": se_twitter},
             "bank",
-            n_senses=3,
-            weight_config={'coherence': 0.5, 'separation': 0.5}  # Emphasize semantic quality
+            similarity_threshold=0.3,  # Require 30% similarity to cluster
         )
+        
+        # Using distance_threshold (legacy: higher = more permissive)
+        result = merge_with_weights(
+            {"wiki": se_wiki, "twitter": se_twitter},
+            "bank",
+            distance_threshold=0.7,  # Allow up to 70% distance (30% similarity)
+        )
+        
         print(f"Source weights: {result.source_weights}")
         print(f"Convergent: {result.n_convergent}")
         ```
     """
+    # Handle threshold parameters
+    if similarity_threshold is not None:
+        # Convert similarity to distance: distance = 1 - similarity
+        distance_threshold = 1.0 - similarity_threshold
+        if verbose:
+            print(f"  Using similarity_threshold={similarity_threshold:.3f} "
+                  f"(distance_threshold={distance_threshold:.3f})")
+    elif distance_threshold is None:
+        distance_threshold = 0.05  # Default
+    
     # Import weighting module
     try:
         from .embedding_weights import (
