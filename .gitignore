@@ -190,3 +190,4 @@ outdated/
 tester*.py
 *.html
 *.png
+*.tsv
