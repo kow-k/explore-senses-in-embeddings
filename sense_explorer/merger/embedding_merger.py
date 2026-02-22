@@ -1525,10 +1525,96 @@ def merge_with_weights(
     if total_sw > 0:
         sense_weights = {k: v / total_sw for k, v in sense_weights.items()}
     
-    # === STEP 4: Compute Similarities Directly (dimension-safe) ===
-    # We compute similarity directly from aligned sense vectors
-    # instead of using merger.compute_merged_similarity() which
-    # relies on original (potentially misaligned) embeddings
+    # === STEP 4: Compute Similarities via Basis Projection ===
+    # Use the principled approach: project senses onto shared vocabulary basis
+    # This maps both embeddings into a common space where dimensions correspond
+    
+    # Build shared vocabulary across all explorers
+    shared_vocab = None
+    for name, se in explorers.items():
+        vocab = set(se.embeddings.keys())
+        if shared_vocab is None:
+            shared_vocab = vocab
+        else:
+            shared_vocab &= vocab
+    
+    shared_vocab_list = sorted(list(shared_vocab))
+    
+    if verbose:
+        print(f"\n  Shared vocabulary for basis: {len(shared_vocab_list)} words")
+    
+    # Build embedding lookup (with dimension alignment already applied)
+    embeddings_lookup = {}
+    for name, se in explorers.items():
+        embeddings_lookup[name] = se.embeddings
+    
+    def project_sense_to_basis(sense, basis_words, embeddings):
+        """Project sense onto vocabulary basis (dimension-safe)."""
+        vectors = embeddings[sense.source]
+        projection = []
+        
+        for word in basis_words:
+            if word in vectors:
+                # Use source-specific embedding for projection
+                # This handles dimension differences automatically
+                word_vec = vectors[word]
+                sense_vec = sense.vector
+                
+                # Ensure same dimension for dot product
+                min_dim = min(len(sense_vec), len(word_vec))
+                sim = np.dot(sense_vec[:min_dim], word_vec[:min_dim])
+                projection.append(sim)
+            else:
+                projection.append(0.0)
+        
+        return np.array(projection)
+    
+    def compute_basis_similarity(sense_u, sense_v, embeddings):
+        """Compute similarity between two senses via basis projection."""
+        # Get neighborhoods for basis construction
+        neighbors_u = [(w, s) for w, s in (sense_u.top_neighbors or [])[:50]]
+        neighbors_v = [(w, s) for w, s in (sense_v.top_neighbors or [])[:50]]
+        
+        words_u = set(w for w, _ in neighbors_u) & shared_vocab
+        words_v = set(w for w, _ in neighbors_v) & shared_vocab
+        
+        # Core = intersection, extensions = unique to each
+        core = words_u & words_v
+        ext_u = words_u - core
+        ext_v = words_v - core
+        
+        # Build basis: core + interleaved extensions
+        basis = list(core)
+        ext_u_list = list(ext_u)
+        ext_v_list = list(ext_v)
+        
+        max_basis = 100
+        i, j = 0, 0
+        while len(basis) < max_basis and (i < len(ext_u_list) or j < len(ext_v_list)):
+            if i < len(ext_u_list):
+                basis.append(ext_u_list[i])
+                i += 1
+            if j < len(ext_v_list) and len(basis) < max_basis:
+                basis.append(ext_v_list[j])
+                j += 1
+        
+        if len(basis) < 3:
+            # Fallback to direct similarity if basis too small
+            min_dim = min(len(sense_u.vector), len(sense_v.vector))
+            return float(np.dot(sense_u.vector[:min_dim], sense_v.vector[:min_dim]))
+        
+        # Project both senses onto basis
+        proj_u = project_sense_to_basis(sense_u, basis, embeddings)
+        proj_v = project_sense_to_basis(sense_v, basis, embeddings)
+        
+        # Compute cosine similarity in projected space
+        norm_u = np.linalg.norm(proj_u)
+        norm_v = np.linalg.norm(proj_v)
+        
+        if norm_u < 1e-10 or norm_v < 1e-10:
+            return 0.0
+        
+        return float(np.dot(proj_u, proj_v) / (norm_u * norm_v))
     
     n = len(all_senses)
     similarity_matrix = np.eye(n)
@@ -1536,18 +1622,17 @@ def merge_with_weights(
     
     for i in range(n):
         for j in range(i + 1, n):
-            vec_i = all_senses[i].vector
-            vec_j = all_senses[j].vector
-            
-            # Direct cosine similarity (vectors are already normalized)
-            sim = float(np.dot(vec_i, vec_j))
+            sim = compute_basis_similarity(
+                all_senses[i], 
+                all_senses[j], 
+                embeddings_lookup
+            )
             similarity_matrix[i, j] = sim
             similarity_matrix[j, i] = sim
             
             sid_i = all_senses[i].sense_id
             sid_j = all_senses[j].sense_id
             
-            # Compute basic pairwise stats
             pairwise_stats[(sid_i, sid_j)] = {
                 'similarity': sim,
                 'sources': (all_senses[i].source, all_senses[j].source),
