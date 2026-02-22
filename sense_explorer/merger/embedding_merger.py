@@ -373,7 +373,8 @@ class EmbeddingMerger:
         self, 
         name: str, 
         vectors: Dict[str, np.ndarray],
-        normalize: bool = True
+        normalize: bool = True,
+        align_dimensions: bool = True
     ) -> 'EmbeddingMerger':
         """
         Add an embedding source for merger.
@@ -382,10 +383,38 @@ class EmbeddingMerger:
             name: Identifier for this embedding (e.g., "wikipedia", "twitter")
             vectors: Dictionary mapping words to vectors
             normalize: Whether to L2-normalize vectors
+            align_dimensions: If True, align to first embedding's dimension
             
         Returns:
             self (for chaining)
         """
+        # Get dimension of this embedding
+        sample_vec = next(iter(vectors.values()))
+        this_dim = len(sample_vec)
+        
+        # Determine target dimension (first embedding sets it)
+        if not hasattr(self, '_target_dim') or self._target_dim is None:
+            self._target_dim = this_dim
+        
+        target_dim = self._target_dim
+        
+        # Align dimensions if needed
+        if align_dimensions and this_dim != target_dim:
+            if self.verbose:
+                print(f"  Aligning '{name}' from {this_dim}d to {target_dim}d")
+            
+            aligned = {}
+            for word, vec in vectors.items():
+                if this_dim > target_dim:
+                    # Truncate
+                    aligned[word] = vec[:target_dim]
+                else:
+                    # Pad with zeros
+                    padded = np.zeros(target_dim)
+                    padded[:this_dim] = vec
+                    aligned[word] = padded
+            vectors = aligned
+        
         if normalize:
             normalized = {}
             for word, vec in vectors.items():
@@ -399,7 +428,7 @@ class EmbeddingMerger:
         self._shared_vocab = None
         
         if self.verbose:
-            print(f"Added embedding '{name}': {len(vectors)} words, {len(next(iter(vectors.values())))}d")
+            print(f"Added embedding '{name}': {len(vectors)} words, {target_dim}d")
         
         return self
     
@@ -1299,6 +1328,346 @@ def plot_spectral_analysis(
 
 
 # =============================================================================
+# WEIGHTED MERGING
+# =============================================================================
+
+@dataclass
+class WeightedMergerResult(MergerResult):
+    """
+    MergerResult extended with weighting information.
+    """
+    source_weights: Dict[str, float] = field(default_factory=dict)
+    sense_weights: Dict[str, float] = field(default_factory=dict)
+    weighted_similarity_matrix: np.ndarray = None
+    quality_assessment: Dict[str, Any] = field(default_factory=dict)
+    
+    @property
+    def weight_summary(self) -> str:
+        """Summarize weights used."""
+        lines = ["Source Weights:"]
+        for name, w in sorted(self.source_weights.items(), key=lambda x: -x[1]):
+            lines.append(f"  {name}: {w:.3f}")
+        return "\n".join(lines)
+
+
+def merge_with_weights(
+    explorers: Dict[str, 'SenseExplorer'],
+    word: str,
+    n_senses: int = None,
+    distance_threshold: float = 0.05,
+    clustering_method: str = 'spectral_hierarchical',
+    weight_config: Dict[str, float] = None,
+    assessment_words: List[str] = None,
+    verbose: bool = True
+) -> WeightedMergerResult:
+    """
+    Merge senses with quality-based weighting.
+    
+    This is the recommended way to merge embeddings — it:
+    1. Assesses quality of each embedding source
+    2. Computes weights based on coherence, separation, vocabulary
+    3. Applies weights to similarity computation
+    4. Uses SSR for sense extraction
+    
+    Args:
+        explorers: Dict mapping names to SenseExplorer instances
+        word: Target word to merge
+        n_senses: Number of senses per embedding (None = auto)
+        distance_threshold: Clustering threshold
+        clustering_method: 'hierarchical', 'spectral', or 'spectral_hierarchical'
+        weight_config: Custom weights for quality components:
+            {'vocab': 0.15, 'coherence': 0.35, 'separation': 0.35, 'overlap': 0.15}
+        assessment_words: Words to use for quality assessment (default: auto)
+        verbose: Print progress information
+        
+    Returns:
+        WeightedMergerResult with weights and standard merger results
+        
+    Example:
+        ```python
+        result = merge_with_weights(
+            {"wiki": se_wiki, "twitter": se_twitter},
+            "bank",
+            n_senses=3,
+            weight_config={'coherence': 0.5, 'separation': 0.5}  # Emphasize semantic quality
+        )
+        print(f"Source weights: {result.source_weights}")
+        print(f"Convergent: {result.n_convergent}")
+        ```
+    """
+    # Import weighting module
+    try:
+        from .embedding_weights import (
+            EmbeddingQualityAssessor,
+            weight_similarity_matrix,
+            compute_weighted_centroid
+        )
+    except ImportError:
+        from embedding_weights import (
+            EmbeddingQualityAssessor,
+            weight_similarity_matrix,
+            compute_weighted_centroid
+        )
+    
+    # === STEP 1: Quality Assessment ===
+    if verbose:
+        print("=" * 60)
+        print(f"WEIGHTED MERGE: '{word}'")
+        print("=" * 60)
+    
+    # Configure assessor
+    if weight_config is None:
+        weight_config = {
+            'vocab': 0.15,
+            'coherence': 0.35,
+            'separation': 0.35,
+            'overlap': 0.15
+        }
+    
+    assessor = EmbeddingQualityAssessor(
+        vocab_weight=weight_config.get('vocab', 0.15),
+        coherence_weight=weight_config.get('coherence', 0.35),
+        separation_weight=weight_config.get('separation', 0.35),
+        overlap_weight=weight_config.get('overlap', 0.15),
+        verbose=verbose
+    )
+    
+    # Add embeddings and explorers
+    for name, se in explorers.items():
+        assessor.add_embedding(name, se.embeddings, se)
+    
+    # Select assessment words
+    if assessment_words is None:
+        # Use target word plus some shared vocabulary
+        shared = list(assessor.shared_vocabulary)
+        assessment_words = [word] + [w for w in shared[:20] if w != word]
+    
+    # Run assessment
+    assessor.assess_all(assessment_words)
+    source_weights = assessor.get_weights()
+    
+    if verbose:
+        print("\n" + "-" * 40)
+        print("QUALITY-BASED WEIGHTS")
+        print("-" * 40)
+        for name, w in sorted(source_weights.items(), key=lambda x: -x[1]):
+            print(f"  {name}: {w:.3f}")
+    
+    # === STEP 2: Extract Senses with SSR ===
+    all_senses = []
+    sense_source_map = {}  # sense_id -> source name
+    target_dim = None  # Will be set by first embedding
+    
+    for name, se in explorers.items():
+        if hasattr(se, 'induce_senses'):
+            ssr_result = se.induce_senses(word, n_senses=n_senses)
+            
+            for sense_name, sense_vec in ssr_result.items():
+                sense_id = f"{name}_{sense_name}"
+                
+                # Align dimension if needed
+                if target_dim is None:
+                    target_dim = len(sense_vec)
+                elif len(sense_vec) != target_dim:
+                    if verbose:
+                        print(f"    Aligning {sense_id} from {len(sense_vec)}d to {target_dim}d")
+                    if len(sense_vec) > target_dim:
+                        sense_vec = sense_vec[:target_dim]
+                    else:
+                        padded = np.zeros(target_dim)
+                        padded[:len(sense_vec)] = sense_vec
+                        sense_vec = padded
+                    # Re-normalize after alignment
+                    norm = np.linalg.norm(sense_vec)
+                    if norm > 0:
+                        sense_vec = sense_vec / norm
+                
+                # Get neighbors (using original embedding for neighbor computation)
+                neighbors = []
+                for w in se.embeddings:
+                    if w != word:
+                        # Use original vectors for neighbor similarity
+                        orig_vec = ssr_result[sense_name]
+                        sim = np.dot(orig_vec, se.embeddings[w])
+                        neighbors.append((w, float(sim)))
+                neighbors.sort(key=lambda x: -x[1])
+                
+                all_senses.append(SenseComponent(
+                    word=word,
+                    sense_id=sense_id,
+                    vector=sense_vec,
+                    source=name,
+                    top_neighbors=neighbors[:50]
+                ))
+                sense_source_map[sense_id] = name
+                
+            if verbose:
+                print(f"  {name}: {len(ssr_result)} senses extracted (weight={source_weights[name]:.3f})")
+        else:
+            if verbose:
+                print(f"  Warning: {name} doesn't have induce_senses")
+    
+    if len(all_senses) < 2:
+        raise ValueError(f"Need at least 2 sense components, got {len(all_senses)}")
+    
+    # === STEP 3: Compute Sense-Level Weights ===
+    sense_weights = {}
+    for sc in all_senses:
+        # Base weight from source
+        base_weight = source_weights.get(sc.source, 0.5)
+        
+        # Could add sense-specific quality here (e.g., from anchor coherence)
+        # For now, use source weight directly
+        sense_weights[sc.sense_id] = base_weight
+    
+    # Normalize sense weights
+    total_sw = sum(sense_weights.values())
+    if total_sw > 0:
+        sense_weights = {k: v / total_sw for k, v in sense_weights.items()}
+    
+    # === STEP 4: Compute Similarities Directly (dimension-safe) ===
+    # We compute similarity directly from aligned sense vectors
+    # instead of using merger.compute_merged_similarity() which
+    # relies on original (potentially misaligned) embeddings
+    
+    n = len(all_senses)
+    similarity_matrix = np.eye(n)
+    pairwise_stats = {}
+    
+    for i in range(n):
+        for j in range(i + 1, n):
+            vec_i = all_senses[i].vector
+            vec_j = all_senses[j].vector
+            
+            # Direct cosine similarity (vectors are already normalized)
+            sim = float(np.dot(vec_i, vec_j))
+            similarity_matrix[i, j] = sim
+            similarity_matrix[j, i] = sim
+            
+            sid_i = all_senses[i].sense_id
+            sid_j = all_senses[j].sense_id
+            
+            # Compute basic pairwise stats
+            pairwise_stats[(sid_i, sid_j)] = {
+                'similarity': sim,
+                'sources': (all_senses[i].source, all_senses[j].source),
+                'cross_source': all_senses[i].source != all_senses[j].source
+            }
+    
+    # === STEP 5: Apply Weights to Similarity Matrix ===
+    weight_list = [sense_weights[sc.sense_id] for sc in all_senses]
+    weighted_sim_matrix = weight_similarity_matrix(
+        similarity_matrix,
+        weight_list,
+        method="symmetric"
+    )
+    
+    if verbose:
+        # Report similarity statistics
+        cross_sims = []
+        within_sims = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                if all_senses[i].source != all_senses[j].source:
+                    cross_sims.append(weighted_sim_matrix[i, j])
+                else:
+                    within_sims.append(weighted_sim_matrix[i, j])
+        
+        if cross_sims:
+            print(f"\n  Cross-source (weighted): mean={np.mean(cross_sims):.3f}, max={np.max(cross_sims):.3f}")
+        if within_sims:
+            print(f"  Within-source (weighted): mean={np.mean(within_sims):.3f}")
+    
+    # === STEP 6: Cluster Using Weighted Similarities ===
+    # Create minimal merger for clustering (doesn't need embeddings)
+    merger = EmbeddingMerger(
+        clustering_method=clustering_method,
+        verbose=False
+    )
+    
+    # Use the weighted similarity matrix for clustering
+    clusters, analysis, spectral_info = merger._cluster_and_analyze(
+        all_senses, weighted_sim_matrix, distance_threshold, n_clusters=None
+    )
+    
+    if verbose:
+        print(f"\n  Clusters: {len(set(clusters.values()))}")
+        convergent = sum(1 for info in analysis.values() if info.get("is_convergent", False))
+        print(f"  Convergent: {convergent}")
+        if spectral_info:
+            print(f"  Spectral suggested k: {spectral_info.suggested_k}")
+    
+    # === STEP 7: Build Result ===
+    result = WeightedMergerResult(
+        word=word,
+        sense_components=all_senses,
+        similarity_matrix=similarity_matrix,
+        clusters=clusters,
+        analysis=analysis,
+        pairwise_stats=pairwise_stats,
+        threshold_used=distance_threshold,
+        clustering_method=clustering_method,
+        spectral_info=spectral_info,
+        source_weights=source_weights,
+        sense_weights=sense_weights,
+        weighted_similarity_matrix=weighted_sim_matrix,
+        quality_assessment={
+            'config': weight_config,
+            'qualities': {name: {
+                'vocab_score': q.vocab_score,
+                'coherence_score': q.coherence_score,
+                'separation_score': q.separation_score,
+                'overlap_score': q.overlap_score,
+                'composite': q.composite_score
+            } for name, q in assessor.qualities.items()}
+        }
+    )
+    
+    return result
+
+
+def weighted_report(result: WeightedMergerResult) -> str:
+    """Generate a text report of weighted merger results."""
+    lines = ["=" * 60]
+    lines.append(f"WEIGHTED EMBEDDING MERGER: '{result.word}'")
+    lines.append("=" * 60)
+    
+    # Weight summary
+    lines.append("\nSOURCE WEIGHTS (quality-based):")
+    for name, w in sorted(result.source_weights.items(), key=lambda x: -x[1]):
+        lines.append(f"  {name}: {w:.3f}")
+    
+    # Quality breakdown
+    if result.quality_assessment and 'qualities' in result.quality_assessment:
+        lines.append("\nQUALITY COMPONENTS:")
+        for name, q in result.quality_assessment['qualities'].items():
+            lines.append(f"  {name}:")
+            lines.append(f"    vocab={q['vocab_score']:.2f}, coherence={q['coherence_score']:.2f}, "
+                        f"separation={q['separation_score']:.2f}, overlap={q['overlap_score']:.2f}")
+    
+    # Standard merger info
+    lines.append(f"\nCLUSTERING:")
+    lines.append(f"  Method: {result.clustering_method}")
+    lines.append(f"  Threshold: {result.threshold_used}")
+    lines.append(f"  Clusters: {result.n_clusters} ({result.n_convergent} convergent, {result.n_source_specific} source-specific)")
+    
+    if result.spectral_info:
+        lines.append(f"  Spectral suggested k: {result.spectral_info.suggested_k}")
+    
+    # Cluster details
+    lines.append("\nCLUSTER DETAILS:")
+    for cluster_id, info in sorted(result.analysis.items()):
+        lines.append(f"\n  [Cluster {cluster_id}] {'CONVERGENT' if info['is_convergent'] else 'SOURCE-SPECIFIC'}")
+        
+        for mi in info["member_info"]:
+            weight = result.sense_weights.get(mi['sense_id'], 0)
+            lines.append(f"    {mi['source']} (w={weight:.2f}): {', '.join(mi['neighbors'][:5])}")
+    
+    lines.append("\n" + "=" * 60)
+    return "\n".join(lines)
+
+
+# =============================================================================
 # MODULE TEST
 # =============================================================================
 
@@ -1309,10 +1678,14 @@ if __name__ == "__main__":
     print("  - 'hierarchical': Standard agglomerative")
     print("  - 'spectral': Pure spectral with eigengap k-selection")
     print("  - 'spectral_hierarchical': Hybrid (recommended)")
-    print("\nUsage:")
+    print("\nStandard usage:")
     print("  from sense_explorer.merger import EmbeddingMerger")
     print("  merger = EmbeddingMerger(clustering_method='spectral_hierarchical')")
     print("  merger.add_embedding('wiki', wiki_vectors)")
     print("  merger.add_embedding('twitter', twitter_vectors)")
     print("  result = merger.merge_senses('bank')")
-    print("  print(f'Spectral k={result.spectral_info.suggested_k}')")
+    print("\nWeighted usage (recommended):")
+    print("  from sense_explorer.merger import merge_with_weights")
+    print("  result = merge_with_weights({'wiki': se_wiki, 'twitter': se_twitter}, 'bank')")
+    print("  print(f'Source weights: {result.source_weights}')")
+    print("  print(f'Convergent: {result.n_convergent}')")

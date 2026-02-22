@@ -337,7 +337,7 @@ class SenseExplorer:
         return cls(emb_dict, **kwargs)
     
     @classmethod
-    def from_file(cls, filepath: str, max_words: int = None, **kwargs) -> 'SenseExplorer':
+    def from_file(cls, filepath: str, max_words: int = None, target_dim: int = None, **kwargs) -> 'SenseExplorer':
         """
         Auto-detect format and load embeddings.
 
@@ -350,6 +350,9 @@ class SenseExplorer:
         Args:
             filepath: Path to embedding file
             max_words: Maximum number of words to load
+            target_dim: Target dimension for alignment. If provided, embeddings
+                       will be truncated or zero-padded to this dimension.
+                       Useful for merging embeddings with different dimensions.
             **kwargs: Additional arguments for SenseExplorer
 
         Returns:
@@ -357,6 +360,7 @@ class SenseExplorer:
         """
         import os
         ext = os.path.splitext(filepath)[1].lower()
+        verbose = kwargs.get('verbose', True)
 
         if ext == '.gz':
             # Peek to determine if gzipped text or gzipped binary
@@ -366,36 +370,97 @@ class SenseExplorer:
             try:
                 sample.decode('utf-8')
                 # Valid UTF-8 — gzipped GloVe text
-                embeddings, dim = cls._load_glove(filepath, max_words,
-                                                  kwargs.get('verbose', True))
+                embeddings, dim = cls._load_glove(filepath, max_words, verbose)
             except UnicodeDecodeError:
                 # Binary data — gzipped word2vec binary
-                embeddings, dim = cls._load_gensim_model(filepath, max_words,
-                                                         kwargs.get('verbose', True))
-            return cls(embeddings, dim=dim, **kwargs)
+                embeddings, dim = cls._load_gensim_model(filepath, max_words, verbose)
         elif ext == '.model':
             # Gensim native format
-            embeddings, dim = cls._load_gensim_model(filepath, max_words,
-                                                     kwargs.get('verbose', True))
-            return cls(embeddings, dim=dim, **kwargs)
+            embeddings, dim = cls._load_gensim_model(filepath, max_words, verbose)
         elif ext == '.bin':
             # Try Gensim/Word2Vec binary first, fall back to GloVe binary
             try:
-                embeddings, dim = cls._load_gensim_model(filepath, max_words,
-                                                         kwargs.get('verbose', True))
+                embeddings, dim = cls._load_gensim_model(filepath, max_words, verbose)
             except Exception:
-                embeddings, dim = cls._load_glove(filepath, max_words,
-                                                  kwargs.get('verbose', True))
-            return cls(embeddings, dim=dim, **kwargs)
+                embeddings, dim = cls._load_glove(filepath, max_words, verbose)
         elif ext == '.npy':
             raise ValueError(
                 f"Cannot load .npy directly. Use the .model file instead: "
                 f"{filepath.replace('.vectors.npy', '')}")
         else:
             # Default: GloVe text
-            embeddings, dim = cls._load_glove(filepath, max_words,
-                                              kwargs.get('verbose', True))
-            return cls(embeddings, dim=dim, **kwargs)
+            embeddings, dim = cls._load_glove(filepath, max_words, verbose)
+        
+        # Verify and fix dimensions
+        # Some files have inconsistent dimensions or misleading headers
+        if embeddings and target_dim is not None:
+            # Check all vectors and align any that don't match target_dim
+            needs_alignment = False
+            for word, vec in embeddings.items():
+                if len(vec) != target_dim:
+                    needs_alignment = True
+                    break
+            
+            if needs_alignment:
+                # Find the most common dimension
+                sample_dims = [len(v) for v in list(embeddings.values())[:100]]
+                actual_dim = max(set(sample_dims), key=sample_dims.count)
+                if verbose:
+                    print(f"  Detected actual dimension: {actual_dim}d (target: {target_dim}d)")
+                embeddings, dim = cls._align_dimensions(embeddings, actual_dim, target_dim, verbose)
+        elif embeddings:
+            # No target_dim specified, but verify consistency
+            sample_vec = next(iter(embeddings.values()))
+            actual_dim = len(sample_vec)
+            if actual_dim != dim:
+                if verbose:
+                    print(f"  Warning: Reported dim={dim} but actual dim={actual_dim}")
+                dim = actual_dim
+        
+        return cls(embeddings, dim=dim, **kwargs)
+    
+    @staticmethod
+    def _align_dimensions(
+        embeddings: Dict[str, np.ndarray],
+        current_dim: int,
+        target_dim: int,
+        verbose: bool = True
+    ) -> Tuple[Dict[str, np.ndarray], int]:
+        """
+        Align embedding dimensions to target.
+        
+        Args:
+            embeddings: Dict mapping words to vectors
+            current_dim: Most common current dimension of embeddings
+            target_dim: Target dimension
+            verbose: Print progress
+            
+        Returns:
+            Tuple of (aligned_embeddings, target_dim)
+        """
+        if verbose:
+            if current_dim > target_dim:
+                print(f"  Truncating embeddings from {current_dim}d to {target_dim}d")
+            elif current_dim < target_dim:
+                print(f"  Padding embeddings from {current_dim}d to {target_dim}d")
+            else:
+                print(f"  Aligning embeddings to {target_dim}d (fixing inconsistent dimensions)")
+        
+        aligned = {}
+        for word, vec in embeddings.items():
+            vec_dim = len(vec)
+            if vec_dim == target_dim:
+                aligned[word] = vec
+            elif vec_dim > target_dim:
+                # Truncate
+                aligned[word] = vec[:target_dim].copy()
+            else:
+                # Pad with zeros
+                padded = np.zeros(target_dim, dtype=vec.dtype)
+                padded[:vec_dim] = vec
+                aligned[word] = padded
+        
+        return aligned, target_dim
 
     @staticmethod
     def _load_gensim_model(filepath: str, max_words: int = None,

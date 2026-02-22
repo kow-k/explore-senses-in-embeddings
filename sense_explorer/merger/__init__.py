@@ -27,6 +27,14 @@ Clustering Methods:
     - 'spectral': Pure spectral clustering with eigengap k-selection
     - 'spectral_hierarchical': Hybrid (recommended) — wave-aware + dendrograms
 
+Quality-Based Weighting (NEW in v0.3.0):
+    The merger now supports quality-based weighting of embedding sources.
+    Weights are computed from:
+    - Vocabulary size (log-scaled)
+    - Anchor coherence (from IVA distillation)
+    - Sense separation quality (R² from geometry)
+    - Vocabulary overlap (shared words)
+
 Basic Usage:
     ```python
     from sense_explorer import SenseExplorer
@@ -44,6 +52,19 @@ Basic Usage:
     result = merger.merge_senses("bank")
     print(f"Convergent: {result.n_convergent}")
     print(f"Source-specific: {result.n_source_specific}")
+    ```
+
+Weighted Merge (Recommended):
+    ```python
+    from sense_explorer.merger import merge_with_weights
+    
+    result = merge_with_weights(
+        {"wiki": se_wiki, "twitter": se_twitter},
+        "bank",
+        weight_config={'coherence': 0.4, 'separation': 0.4}  # Custom weights
+    )
+    print(f"Source weights: {result.source_weights}")
+    print(f"Convergent: {result.n_convergent}")
     ```
 
 Convenience Methods (on SenseExplorer):
@@ -71,7 +92,7 @@ For Large Embeddings (Staged Merger):
 
 Author: Kow Kuroda & Claude (Anthropic)
 License: MIT
-Version: 0.2.0
+Version: 0.3.0
 """
 
 from .embedding_merger import (
@@ -84,12 +105,17 @@ from .embedding_merger import (
     MergerBasis,
     SpectralInfo,
     
+    # Weighted merger classes
+    WeightedMergerResult,
+    
     # Enums
     ClusteringMethod,
     
     # Integration functions
     create_merger_from_explorers,
     merge_with_ssr,
+    merge_with_weights,  # NEW: Quality-weighted merge
+    weighted_report,     # NEW: Report for weighted results
     
     # Visualization
     plot_merger_dendrogram,
@@ -99,6 +125,22 @@ from .embedding_merger import (
     compute_laplacian_spectrum,
     find_k_by_eigengap,
     spectral_embedding_from_similarity,
+)
+
+from .embedding_weights import (
+    # Quality assessment
+    EmbeddingQualityAssessor,
+    EmbeddingQuality,
+    SenseQuality,
+    WeightedSenseComponent,
+    
+    # Weighted computation
+    compute_weighted_similarity,
+    compute_weighted_centroid,
+    weight_similarity_matrix,
+    
+    # Convenience
+    quick_assess,
 )
 
 from .staged_embedding_merger import (
@@ -118,7 +160,7 @@ from .staged_embedding_merger import (
     quick_staged_merge,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __author__ = "Kow Kuroda & Claude"
 
 __all__ = [
@@ -133,6 +175,21 @@ __all__ = [
     'merge_with_ssr',
     'plot_merger_dendrogram',
     'plot_spectral_analysis',
+    
+    # Weighted merger (NEW)
+    'WeightedMergerResult',
+    'merge_with_weights',
+    'weighted_report',
+    
+    # Quality assessment (NEW)
+    'EmbeddingQualityAssessor',
+    'EmbeddingQuality',
+    'SenseQuality',
+    'WeightedSenseComponent',
+    'compute_weighted_similarity',
+    'compute_weighted_centroid',
+    'weight_similarity_matrix',
+    'quick_assess',
     
     # Spectral analysis
     'compute_laplacian_spectrum',
