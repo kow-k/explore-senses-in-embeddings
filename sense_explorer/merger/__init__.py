@@ -184,6 +184,18 @@ from .convergence_validation import (
     summarize_validations,
 )
 
+from .procrustes_alignment import (
+    # Data classes
+    ProcrustesAlignment,
+    
+    # Core functions
+    discover_invariants,
+    compute_procrustes_alignment,
+    align_embeddings,
+    evaluate_alignment,
+    align_embedding_spaces,
+)
+
 from .register_profiles import (
     # Data classes
     SensePrevalence,
@@ -230,10 +242,18 @@ from .staged_embedding_merger import (
     quick_staged_merge,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __author__ = "Kow Kuroda & Claude"
 
 __all__ = [
+    # Procrustes alignment (NEW in 0.6.0)
+    'ProcrustesAlignment',
+    'discover_invariants',
+    'compute_procrustes_alignment',
+    'align_embeddings',
+    'evaluate_alignment',
+    'align_embedding_spaces',
+    
     # Core merger
     'EmbeddingMerger',
     'SenseComponent',

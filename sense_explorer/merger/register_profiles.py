@@ -314,9 +314,13 @@ def compute_register_neighbors(
             if sense_vec is not None:
                 # Find neighbors
                 neighbors = []
+                sense_dim = len(sense_vec)
                 for w in se.vocab:
                     if w != word:
-                        sim = float(np.dot(sense_vec, se.embeddings[w]))
+                        w_vec = se.embeddings[w]
+                        # Handle dimension mismatch
+                        min_dim = min(sense_dim, len(w_vec))
+                        sim = float(np.dot(sense_vec[:min_dim], w_vec[:min_dim]))
                         neighbors.append((w, sim))
                 neighbors.sort(key=lambda x: -x[1])
                 register_sense_neighbors[reg_name][sense_name] = neighbors[:top_k]
@@ -420,9 +424,13 @@ def compute_sense_drift(
             if sense_vec is not None:
                 # Project onto shared vocabulary basis
                 projection = []
+                sense_dim = len(sense_vec)
                 for w in shared_vocab_list:
                     if w in se.embeddings:
-                        sim = float(np.dot(sense_vec, se.embeddings[w]))
+                        w_vec = se.embeddings[w]
+                        # Handle dimension mismatch
+                        min_dim = min(sense_dim, len(w_vec))
+                        sim = float(np.dot(sense_vec[:min_dim], w_vec[:min_dim]))
                         projection.append(sim)
                     else:
                         projection.append(0.0)

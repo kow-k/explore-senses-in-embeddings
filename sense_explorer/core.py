@@ -1646,6 +1646,7 @@ class SenseExplorer:
         Achieves ~56% accuracy.
         """
         target_emb = self._embeddings_norm[word]
+        target_dim = len(target_emb)
         
         # Find nearest neighbors (excluding the word itself)
         k_neighbors = min(100, self.vocab_size - 1)
@@ -1654,14 +1655,27 @@ class SenseExplorer:
         for w, emb in self._embeddings_norm.items():
             if w == word:
                 continue
-            sim = np.dot(target_emb, emb)
+            # Handle dimension mismatch
+            min_dim = min(target_dim, len(emb))
+            sim = np.dot(target_emb[:min_dim], emb[:min_dim])
             similarities.append((w, sim, self.embeddings[w]))
         
         similarities.sort(key=lambda x: -x[1])
         neighbors = similarities[:k_neighbors]
         
         neighbor_words = [n[0] for n in neighbors]
-        neighbor_vecs = np.array([n[2] for n in neighbors])
+        # Ensure all neighbor vectors have consistent dimensions
+        neighbor_vecs = []
+        for n in neighbors:
+            vec = n[2]
+            if len(vec) < target_dim:
+                # Pad with zeros if shorter
+                vec = np.concatenate([vec, np.zeros(target_dim - len(vec))])
+            elif len(vec) > target_dim:
+                # Truncate if longer
+                vec = vec[:target_dim]
+            neighbor_vecs.append(vec)
+        neighbor_vecs = np.array(neighbor_vecs)
         
         # Normalize for clustering
         norms = np.linalg.norm(neighbor_vecs, axis=1, keepdims=True) + 1e-10
@@ -1704,6 +1718,7 @@ class SenseExplorer:
             Tuple of (anchors dict, optimal_k)
         """
         target_emb = self._embeddings_norm[word]
+        target_dim = len(target_emb)
         
         # Find nearest neighbors
         k_neighbors = min(100, self.vocab_size - 1)
@@ -1712,14 +1727,27 @@ class SenseExplorer:
         for w, emb in self._embeddings_norm.items():
             if w == word:
                 continue
-            sim = np.dot(target_emb, emb)
+            # Handle dimension mismatch
+            min_dim = min(target_dim, len(emb))
+            sim = np.dot(target_emb[:min_dim], emb[:min_dim])
             similarities.append((w, sim, self.embeddings[w]))
         
         similarities.sort(key=lambda x: -x[1])
         neighbors = similarities[:k_neighbors]
         
         neighbor_words = [n[0] for n in neighbors]
-        neighbor_vecs = np.array([n[2] for n in neighbors])
+        # Ensure all neighbor vectors have consistent dimensions
+        neighbor_vecs = []
+        for n in neighbors:
+            vec = n[2]
+            if len(vec) < target_dim:
+                # Pad with zeros if shorter
+                vec = np.concatenate([vec, np.zeros(target_dim - len(vec))])
+            elif len(vec) > target_dim:
+                # Truncate if longer
+                vec = vec[:target_dim]
+            neighbor_vecs.append(vec)
+        neighbor_vecs = np.array(neighbor_vecs)
         
         # Normalize for clustering
         norms = np.linalg.norm(neighbor_vecs, axis=1, keepdims=True) + 1e-10
