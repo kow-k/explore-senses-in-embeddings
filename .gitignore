@@ -189,3 +189,4 @@ outdated/
 #*.py # This hurts
 tester*.py
 *.html
+*.png
