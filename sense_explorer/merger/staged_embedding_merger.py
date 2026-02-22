@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Staged Embedding Merger for SenseExplorer
-==========================================
+staged_embedding_merger.py - Staged Embedding Merger for SenseExplorer
+=======================================================================
 
 Memory-efficient multi-embedding merger using deliberate staging.
 
@@ -19,7 +19,7 @@ Strategies:
 
 Usage:
     ```python
-    from sense_explorer.staged_merger import StagedMerger, MergeStrategy
+    from sense_explorer.merger import StagedMerger, MergeStrategy
     
     # Define embeddings (paths, not loaded)
     embedding_specs = {
@@ -58,11 +58,11 @@ import warnings
 import gc
 
 try:
-    from .merger import (
+    from .embedding_merger import (
         EmbeddingMerger, SenseComponent, MergerResult, MergerBasis
     )
 except ImportError:
-    from merger import (
+    from embedding_merger import (
         EmbeddingMerger, SenseComponent, MergerResult, MergerBasis
     )
 

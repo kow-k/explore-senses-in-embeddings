@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Embedding Merger Module for SenseExplorer
-==========================================
+embedding_merger.py - Embedding Merger Module for SenseExplorer
+================================================================
 
 Combines word embeddings from multiple sources into a unified semantic space.
 
@@ -15,6 +15,12 @@ Theoretical Foundation:
     2. Identify shared semantic basis across embeddings
     3. Project senses onto this basis for comparison
     4. Cluster to find convergent (shared) vs source-specific senses
+
+Clustering Methods (v0.9.3):
+    - 'hierarchical': Standard agglomerative clustering on similarity matrix
+    - 'spectral': Spectral clustering with eigengap-based k selection
+    - 'spectral_hierarchical': Hybrid - spectral embedding + hierarchical clustering
+                               (recommended - wave-aware + dendrogram visualization)
 
 Cognitive Motivation:
     Humans build unified lexicons from diverse linguistic experiences.
@@ -30,8 +36,8 @@ Integration with SenseExplorer:
     se_wiki = SenseExplorer.from_file("glove-wiki-100d.txt")
     se_twitter = SenseExplorer.from_file("glove-twitter-100d.txt")
     
-    # Create merger
-    merger = EmbeddingMerger()
+    # Create merger with spectral-hierarchical clustering
+    merger = EmbeddingMerger(clustering_method='spectral_hierarchical')
     merger.add_embedding("wikipedia", se_wiki.embeddings)
     merger.add_embedding("twitter", se_twitter.embeddings)
     
@@ -40,7 +46,7 @@ Integration with SenseExplorer:
     ```
 
 Author: Kow Kuroda & Claude (Anthropic)
-Version: 0.1.0 (for SenseExplorer v0.9.3)
+Version: 0.2.0 (for SenseExplorer v0.9.3)
 """
 
 import numpy as np
@@ -51,7 +57,10 @@ from enum import Enum
 import warnings
 
 try:
-    from sklearn.cluster import AgglomerativeClustering
+    from sklearn.cluster import AgglomerativeClustering, SpectralClustering
+    from sklearn.manifold import spectral_embedding
+    from scipy.sparse.csgraph import laplacian
+    from scipy.linalg import eigh
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -104,6 +113,18 @@ class MergerBasis:
 
 
 @dataclass
+class SpectralInfo:
+    """
+    Information from spectral analysis of similarity matrix.
+    """
+    eigenvalues: np.ndarray
+    eigenvectors: np.ndarray
+    eigengaps: np.ndarray
+    suggested_k: int
+    spectral_coords: np.ndarray  # Senses embedded in spectral space
+
+
+@dataclass
 class MergerResult:
     """
     Result of embedding merger for a single word.
@@ -115,6 +136,8 @@ class MergerResult:
     analysis: Dict[int, Dict]  # cluster_label -> analysis
     pairwise_stats: Dict[Tuple[str, str], Dict]
     threshold_used: float
+    clustering_method: str = "hierarchical"
+    spectral_info: Optional[SpectralInfo] = None
     
     @property
     def n_clusters(self) -> int:
@@ -138,11 +161,146 @@ class MergerResult:
         return [info for info in self.analysis.values() if not info.get("is_convergent", False)]
 
 
-class MergerMode(Enum):
-    """Modes for handling sense extraction."""
-    EXTERNAL = "external"  # Use provided sense components
-    SIMPLE = "simple"  # Use simple k-means on neighborhoods
-    SSR = "ssr"  # Use SenseExplorer's SSR method
+class ClusteringMethod(Enum):
+    """Available clustering methods for merger."""
+    HIERARCHICAL = "hierarchical"
+    SPECTRAL = "spectral"
+    SPECTRAL_HIERARCHICAL = "spectral_hierarchical"  # Hybrid (recommended)
+
+
+# =============================================================================
+# SPECTRAL ANALYSIS FUNCTIONS
+# =============================================================================
+
+def compute_laplacian_spectrum(
+    similarity_matrix: np.ndarray,
+    n_components: int = None,
+    normalized: bool = True
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute eigenvalues and eigenvectors of the graph Laplacian.
+    
+    Args:
+        similarity_matrix: Symmetric similarity matrix (n x n)
+        n_components: Number of eigenvectors to compute (default: all)
+        normalized: Use normalized Laplacian (recommended)
+        
+    Returns:
+        (eigenvalues, eigenvectors)
+    """
+    n = similarity_matrix.shape[0]
+    if n_components is None:
+        n_components = n
+    
+    # Ensure non-negative similarities
+    S = np.maximum(similarity_matrix, 0)
+    np.fill_diagonal(S, 0)  # No self-loops
+    
+    # Degree matrix
+    D = np.diag(S.sum(axis=1))
+    
+    if normalized:
+        # Normalized Laplacian: L = I - D^{-1/2} S D^{-1/2}
+        D_inv_sqrt = np.diag(1.0 / np.sqrt(np.diag(D) + 1e-10))
+        L = np.eye(n) - D_inv_sqrt @ S @ D_inv_sqrt
+    else:
+        # Unnormalized Laplacian: L = D - S
+        L = D - S
+    
+    # Compute eigendecomposition
+    eigenvalues, eigenvectors = eigh(L)
+    
+    # Sort by eigenvalue (ascending)
+    idx = np.argsort(eigenvalues)
+    eigenvalues = eigenvalues[idx][:n_components]
+    eigenvectors = eigenvectors[:, idx][:, :n_components]
+    
+    return eigenvalues, eigenvectors
+
+
+def find_k_by_eigengap(
+    eigenvalues: np.ndarray,
+    min_k: int = 2,
+    max_k: int = None
+) -> Tuple[int, np.ndarray]:
+    """
+    Find optimal number of clusters using eigengap heuristic.
+    
+    The eigengap is the difference between consecutive eigenvalues.
+    A large gap indicates a natural clustering boundary.
+    
+    Args:
+        eigenvalues: Sorted eigenvalues from Laplacian
+        min_k: Minimum number of clusters
+        max_k: Maximum number of clusters
+        
+    Returns:
+        (optimal_k, eigengaps)
+    """
+    n = len(eigenvalues)
+    if max_k is None:
+        max_k = min(n - 1, 10)
+    
+    # Compute gaps
+    gaps = np.diff(eigenvalues)
+    
+    # Find largest gap in valid range
+    valid_range = range(min_k - 1, min(max_k, len(gaps)))
+    if len(valid_range) == 0:
+        return min_k, gaps
+    
+    best_idx = max(valid_range, key=lambda i: gaps[i])
+    optimal_k = best_idx + 1  # +1 because gap[i] is between eigenvalue[i] and eigenvalue[i+1]
+    
+    return optimal_k, gaps
+
+
+def spectral_embedding_from_similarity(
+    similarity_matrix: np.ndarray,
+    n_components: int = None
+) -> Tuple[np.ndarray, SpectralInfo]:
+    """
+    Embed senses into spectral space based on similarity matrix.
+    
+    Args:
+        similarity_matrix: Pairwise similarity matrix
+        n_components: Dimensions of spectral embedding (default: auto via eigengap)
+        
+    Returns:
+        (spectral_coordinates, SpectralInfo)
+    """
+    n = similarity_matrix.shape[0]
+    
+    # Compute Laplacian spectrum
+    eigenvalues, eigenvectors = compute_laplacian_spectrum(
+        similarity_matrix, 
+        n_components=min(n, 10)
+    )
+    
+    # Find optimal k via eigengap
+    suggested_k, eigengaps = find_k_by_eigengap(eigenvalues, min_k=2, max_k=n-1)
+    
+    # Use k eigenvectors for embedding (skip first trivial eigenvector)
+    if n_components is None:
+        n_components = suggested_k
+    
+    # Spectral coordinates: rows of eigenvector matrix (excluding first)
+    # First eigenvector is constant for connected graphs
+    spectral_coords = eigenvectors[:, 1:n_components+1]
+    
+    # Normalize rows (each point on unit sphere)
+    row_norms = np.linalg.norm(spectral_coords, axis=1, keepdims=True)
+    spectral_coords = spectral_coords / (row_norms + 1e-10)
+    
+    info = SpectralInfo(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        eigengaps=eigengaps,
+        suggested_k=suggested_k,
+        spectral_coords=spectral_coords
+    )
+    
+    return spectral_coords, info
 
 
 # =============================================================================
@@ -159,18 +317,23 @@ class EmbeddingMerger:
     3. Projects senses onto shared basis for comparison
     4. Clusters to identify convergent vs source-specific senses
     
+    Clustering Methods:
+        - 'hierarchical': Standard agglomerative clustering (original)
+        - 'spectral': Pure spectral clustering with eigengap k-selection
+        - 'spectral_hierarchical': Hybrid - spectral embedding + hierarchical
+                                   clustering (recommended for wave-like senses)
+    
     Example:
         ```python
-        merger = EmbeddingMerger(verbose=True)
+        merger = EmbeddingMerger(
+            clustering_method='spectral_hierarchical',
+            verbose=True
+        )
         merger.add_embedding("wiki", wiki_vectors)
         merger.add_embedding("twitter", twitter_vectors)
         
-        # Simple mode (k-means sense extraction)
         result = merger.merge_senses("bank", n_senses=3)
-        
-        # With external sense components
-        senses = [SenseComponent(...), ...]
-        result = merger.merge_senses("bank", sense_components=senses)
+        print(f"Spectral suggested k={result.spectral_info.suggested_k}")
         ```
     """
     
@@ -179,6 +342,7 @@ class EmbeddingMerger:
         neighbor_k: int = 50,
         max_basis_size: int = 40,
         default_threshold: float = 0.05,
+        clustering_method: str = 'spectral_hierarchical',
         verbose: bool = False
     ):
         """
@@ -188,6 +352,7 @@ class EmbeddingMerger:
             neighbor_k: Number of neighbors to consider for basis construction
             max_basis_size: Maximum size of merger basis
             default_threshold: Default distance threshold for clustering
+            clustering_method: 'hierarchical', 'spectral', or 'spectral_hierarchical'
             verbose: Print progress information
         """
         self.embeddings: Dict[str, Dict[str, np.ndarray]] = {}
@@ -195,6 +360,12 @@ class EmbeddingMerger:
         self.max_basis_size = max_basis_size
         self.default_threshold = default_threshold
         self.verbose = verbose
+        
+        # Validate clustering method
+        valid_methods = ['hierarchical', 'spectral', 'spectral_hierarchical']
+        if clustering_method not in valid_methods:
+            raise ValueError(f"clustering_method must be one of {valid_methods}")
+        self.clustering_method = clustering_method
         
         self._shared_vocab: Optional[Set[str]] = None
     
@@ -508,135 +679,16 @@ class EmbeddingMerger:
         return float(similarity), stats
     
     # =========================================================================
-    # MAIN MERGE FUNCTION
+    # CLUSTERING METHODS
     # =========================================================================
     
-    def merge_senses(
-        self,
-        word: str,
-        sense_components: List[SenseComponent] = None,
-        n_senses: int = 3,
-        distance_threshold: float = None,
-        return_all_thresholds: bool = False,
-        thresholds: List[float] = None
-    ) -> Union[MergerResult, Dict[float, MergerResult]]:
-        """
-        Merge senses of a word across all loaded embeddings.
-        
-        Args:
-            word: Target word to merge
-            sense_components: Pre-extracted sense components (optional)
-            n_senses: Number of senses to extract per embedding (if not provided)
-            distance_threshold: Clustering threshold (default: self.default_threshold)
-            return_all_thresholds: If True, return results for multiple thresholds
-            thresholds: List of thresholds to test (if return_all_thresholds=True)
-            
-        Returns:
-            MergerResult or Dict[float, MergerResult] if return_all_thresholds=True
-        """
-        if not SKLEARN_AVAILABLE:
-            raise ImportError("sklearn required for clustering")
-        
-        if len(self.embeddings) < 2:
-            raise ValueError("Need at least 2 embeddings for merger")
-        
-        if distance_threshold is None:
-            distance_threshold = self.default_threshold
-        
-        # Extract senses if not provided
-        if sense_components is None:
-            sense_components = []
-            for source in self.embeddings:
-                if word in self.embeddings[source]:
-                    senses = self.extract_senses_simple(word, source, n_senses)
-                    sense_components.extend(senses)
-                    if self.verbose:
-                        print(f"  {source}: {len(senses)} senses extracted")
-        
-        if len(sense_components) < 2:
-            raise ValueError(f"Need at least 2 sense components, got {len(sense_components)}")
-        
-        if self.verbose:
-            print(f"\n[EMBEDDING MERGER] word='{word}'")
-            print(f"  Sense components: {len(sense_components)}")
-            print(f"  Shared vocabulary: {len(self.shared_vocabulary)}")
-        
-        # Compute pairwise similarities
-        n = len(sense_components)
-        similarity_matrix = np.eye(n)
-        pairwise_stats = {}
-        
-        for i in range(n):
-            for j in range(i + 1, n):
-                sim, stats = self.compute_merged_similarity(
-                    sense_components[i], 
-                    sense_components[j]
-                )
-                similarity_matrix[i, j] = sim
-                similarity_matrix[j, i] = sim
-                
-                sid_i = sense_components[i].sense_id
-                sid_j = sense_components[j].sense_id
-                pairwise_stats[(sid_i, sid_j)] = stats
-        
-        if self.verbose:
-            # Compute cross-source stats
-            cross_sims = []
-            within_sims = []
-            for i in range(n):
-                for j in range(i + 1, n):
-                    if sense_components[i].source != sense_components[j].source:
-                        cross_sims.append(similarity_matrix[i, j])
-                    else:
-                        within_sims.append(similarity_matrix[i, j])
-            
-            if cross_sims:
-                print(f"  Cross-source similarity: mean={np.mean(cross_sims):.3f}, max={np.max(cross_sims):.3f}")
-            if within_sims:
-                print(f"  Within-source similarity: mean={np.mean(within_sims):.3f}")
-        
-        # Cluster at specified threshold(s)
-        if return_all_thresholds:
-            if thresholds is None:
-                thresholds = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.15, 0.20, 0.30, 0.50]
-            
-            results = {}
-            for thresh in thresholds:
-                clusters, analysis = self._cluster_and_analyze(
-                    sense_components, similarity_matrix, thresh
-                )
-                results[thresh] = MergerResult(
-                    word=word,
-                    sense_components=sense_components,
-                    similarity_matrix=similarity_matrix,
-                    clusters=clusters,
-                    analysis=analysis,
-                    pairwise_stats=pairwise_stats,
-                    threshold_used=thresh
-                )
-            return results
-        else:
-            clusters, analysis = self._cluster_and_analyze(
-                sense_components, similarity_matrix, distance_threshold
-            )
-            return MergerResult(
-                word=word,
-                sense_components=sense_components,
-                similarity_matrix=similarity_matrix,
-                clusters=clusters,
-                analysis=analysis,
-                pairwise_stats=pairwise_stats,
-                threshold_used=distance_threshold
-            )
-    
-    def _cluster_and_analyze(
+    def _cluster_hierarchical(
         self,
         senses: List[SenseComponent],
         similarity_matrix: np.ndarray,
         threshold: float
-    ) -> Tuple[Dict[str, int], Dict[int, Dict]]:
-        """Cluster senses and analyze results."""
-        # Convert to distance
+    ) -> Tuple[np.ndarray, Optional[SpectralInfo]]:
+        """Standard hierarchical clustering."""
         dist_matrix = 1 - similarity_matrix
         dist_matrix = np.clip(dist_matrix, 0, 2)
         
@@ -648,6 +700,100 @@ class EmbeddingMerger:
         )
         
         labels = clustering.fit_predict(dist_matrix)
+        return labels, None
+    
+    def _cluster_spectral(
+        self,
+        senses: List[SenseComponent],
+        similarity_matrix: np.ndarray,
+        n_clusters: int = None
+    ) -> Tuple[np.ndarray, SpectralInfo]:
+        """Pure spectral clustering with eigengap k-selection."""
+        # Get spectral embedding
+        spectral_coords, info = spectral_embedding_from_similarity(similarity_matrix)
+        
+        # Use suggested k or provided n_clusters
+        k = n_clusters if n_clusters else info.suggested_k
+        k = min(k, len(senses) - 1)  # Can't have more clusters than senses
+        k = max(k, 2)  # At least 2 clusters
+        
+        # K-means on spectral coordinates
+        from sklearn.cluster import KMeans
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(spectral_coords)
+        
+        return labels, info
+    
+    def _cluster_spectral_hierarchical(
+        self,
+        senses: List[SenseComponent],
+        similarity_matrix: np.ndarray,
+        threshold: float
+    ) -> Tuple[np.ndarray, SpectralInfo]:
+        """
+        Hybrid: Spectral embedding + Hierarchical clustering.
+        
+        This combines:
+        - Spectral's wave-aware similarity computation
+        - Hierarchical's tree structure and threshold-based cutting
+        """
+        # Get spectral embedding
+        spectral_coords, info = spectral_embedding_from_similarity(similarity_matrix)
+        
+        # Compute distances in spectral space
+        n = len(senses)
+        spectral_dist = np.zeros((n, n))
+        for i in range(n):
+            for j in range(i + 1, n):
+                # Euclidean distance in spectral space
+                d = np.linalg.norm(spectral_coords[i] - spectral_coords[j])
+                spectral_dist[i, j] = d
+                spectral_dist[j, i] = d
+        
+        # Normalize distances to [0, 1] range for threshold compatibility
+        max_dist = np.max(spectral_dist)
+        if max_dist > 0:
+            spectral_dist = spectral_dist / max_dist
+        
+        # Hierarchical clustering on spectral distances
+        clustering = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=threshold,
+            metric="precomputed",
+            linkage="average"
+        )
+        
+        labels = clustering.fit_predict(spectral_dist)
+        
+        # Update spectral_info with spectral distance matrix
+        info.spectral_coords = spectral_coords
+        
+        return labels, info
+    
+    def _cluster_and_analyze(
+        self,
+        senses: List[SenseComponent],
+        similarity_matrix: np.ndarray,
+        threshold: float,
+        n_clusters: int = None
+    ) -> Tuple[Dict[str, int], Dict[int, Dict], Optional[SpectralInfo]]:
+        """Cluster senses and analyze results."""
+        
+        # Select clustering method
+        if self.clustering_method == 'hierarchical':
+            labels, spectral_info = self._cluster_hierarchical(
+                senses, similarity_matrix, threshold
+            )
+        elif self.clustering_method == 'spectral':
+            labels, spectral_info = self._cluster_spectral(
+                senses, similarity_matrix, n_clusters
+            )
+        elif self.clustering_method == 'spectral_hierarchical':
+            labels, spectral_info = self._cluster_spectral_hierarchical(
+                senses, similarity_matrix, threshold
+            )
+        else:
+            raise ValueError(f"Unknown clustering method: {self.clustering_method}")
         
         # Build clusters dict
         clusters = {s.sense_id: int(labels[i]) for i, s in enumerate(senses)}
@@ -679,7 +825,142 @@ class EmbeddingMerger:
                 "size": len(members)
             }
         
-        return clusters, analysis
+        return clusters, analysis, spectral_info
+    
+    # =========================================================================
+    # MAIN MERGE FUNCTION
+    # =========================================================================
+    
+    def merge_senses(
+        self,
+        word: str,
+        sense_components: List[SenseComponent] = None,
+        n_senses: int = 3,
+        distance_threshold: float = None,
+        n_clusters: int = None,
+        return_all_thresholds: bool = False,
+        thresholds: List[float] = None
+    ) -> Union[MergerResult, Dict[float, MergerResult]]:
+        """
+        Merge senses of a word across all loaded embeddings.
+        
+        Args:
+            word: Target word to merge
+            sense_components: Pre-extracted sense components (optional)
+            n_senses: Number of senses to extract per embedding (if not provided)
+            distance_threshold: Clustering threshold (default: self.default_threshold)
+            n_clusters: For spectral clustering, override eigengap k-selection
+            return_all_thresholds: If True, return results for multiple thresholds
+            thresholds: List of thresholds to test (if return_all_thresholds=True)
+            
+        Returns:
+            MergerResult or Dict[float, MergerResult] if return_all_thresholds=True
+        """
+        if not SKLEARN_AVAILABLE:
+            raise ImportError("sklearn required for clustering")
+        
+        if len(self.embeddings) < 2:
+            raise ValueError("Need at least 2 embeddings for merger")
+        
+        if distance_threshold is None:
+            distance_threshold = self.default_threshold
+        
+        # Extract senses if not provided
+        if sense_components is None:
+            sense_components = []
+            for source in self.embeddings:
+                if word in self.embeddings[source]:
+                    senses = self.extract_senses_simple(word, source, n_senses)
+                    sense_components.extend(senses)
+                    if self.verbose:
+                        print(f"  {source}: {len(senses)} senses extracted")
+        
+        if len(sense_components) < 2:
+            raise ValueError(f"Need at least 2 sense components, got {len(sense_components)}")
+        
+        if self.verbose:
+            print(f"\n[EMBEDDING MERGER] word='{word}'")
+            print(f"  Clustering method: {self.clustering_method}")
+            print(f"  Sense components: {len(sense_components)}")
+            print(f"  Shared vocabulary: {len(self.shared_vocabulary)}")
+        
+        # Compute pairwise similarities
+        n = len(sense_components)
+        similarity_matrix = np.eye(n)
+        pairwise_stats = {}
+        
+        for i in range(n):
+            for j in range(i + 1, n):
+                sim, stats = self.compute_merged_similarity(
+                    sense_components[i], 
+                    sense_components[j]
+                )
+                similarity_matrix[i, j] = sim
+                similarity_matrix[j, i] = sim
+                
+                sid_i = sense_components[i].sense_id
+                sid_j = sense_components[j].sense_id
+                pairwise_stats[(sid_i, sid_j)] = stats
+        
+        if self.verbose:
+            # Report spectral analysis if using spectral methods
+            if self.clustering_method in ['spectral', 'spectral_hierarchical']:
+                _, info = spectral_embedding_from_similarity(similarity_matrix)
+                print(f"  Spectral analysis: suggested k={info.suggested_k}")
+                print(f"  Top eigengaps: {info.eigengaps[:5].round(3)}")
+            
+            # Compute cross-source stats
+            cross_sims = []
+            within_sims = []
+            for i in range(n):
+                for j in range(i + 1, n):
+                    if sense_components[i].source != sense_components[j].source:
+                        cross_sims.append(similarity_matrix[i, j])
+                    else:
+                        within_sims.append(similarity_matrix[i, j])
+            
+            if cross_sims:
+                print(f"  Cross-source similarity: mean={np.mean(cross_sims):.3f}, max={np.max(cross_sims):.3f}")
+            if within_sims:
+                print(f"  Within-source similarity: mean={np.mean(within_sims):.3f}")
+        
+        # Cluster at specified threshold(s)
+        if return_all_thresholds:
+            if thresholds is None:
+                thresholds = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.15, 0.20, 0.30, 0.50]
+            
+            results = {}
+            for thresh in thresholds:
+                clusters, analysis, spectral_info = self._cluster_and_analyze(
+                    sense_components, similarity_matrix, thresh, n_clusters
+                )
+                results[thresh] = MergerResult(
+                    word=word,
+                    sense_components=sense_components,
+                    similarity_matrix=similarity_matrix,
+                    clusters=clusters,
+                    analysis=analysis,
+                    pairwise_stats=pairwise_stats,
+                    threshold_used=thresh,
+                    clustering_method=self.clustering_method,
+                    spectral_info=spectral_info
+                )
+            return results
+        else:
+            clusters, analysis, spectral_info = self._cluster_and_analyze(
+                sense_components, similarity_matrix, distance_threshold, n_clusters
+            )
+            return MergerResult(
+                word=word,
+                sense_components=sense_components,
+                similarity_matrix=similarity_matrix,
+                clusters=clusters,
+                analysis=analysis,
+                pairwise_stats=pairwise_stats,
+                threshold_used=distance_threshold,
+                clustering_method=self.clustering_method,
+                spectral_info=spectral_info
+            )
     
     # =========================================================================
     # REPORTING
@@ -690,8 +971,13 @@ class EmbeddingMerger:
         lines = ["=" * 60]
         lines.append(f"EMBEDDING MERGER RESULTS: '{result.word}'")
         lines.append("=" * 60)
+        lines.append(f"Clustering method: {result.clustering_method}")
         lines.append(f"Threshold: {result.threshold_used}")
         lines.append(f"Clusters: {result.n_clusters} ({result.n_convergent} convergent, {result.n_source_specific} source-specific)")
+        
+        if result.spectral_info:
+            lines.append(f"Spectral suggested k: {result.spectral_info.suggested_k}")
+            lines.append(f"Top eigengaps: {result.spectral_info.eigengaps[:4].round(3)}")
         
         for cluster_id, info in sorted(result.analysis.items()):
             lines.append(f"\n[Cluster {cluster_id}]")
@@ -733,7 +1019,7 @@ def create_merger_from_explorers(
         merger = create_merger_from_explorers({
             "wikipedia": se_wiki,
             "twitter": se_twitter
-        })
+        }, clustering_method='spectral_hierarchical')
         
         result = merger.merge_senses("bank")
         ```
@@ -746,6 +1032,7 @@ def merge_with_ssr(
     word: str,
     n_senses: int = None,
     distance_threshold: float = 0.05,
+    clustering_method: str = 'spectral_hierarchical',
     verbose: bool = True
 ) -> MergerResult:
     """
@@ -760,9 +1047,11 @@ def merge_with_ssr(
         result = merge_with_ssr(
             {"wiki": se_wiki, "twitter": se_twitter},
             "bank",
-            n_senses=3
+            n_senses=3,
+            clustering_method='spectral_hierarchical'
         )
         print(f"Convergent: {result.n_convergent}")
+        print(f"Suggested k: {result.spectral_info.suggested_k}")
         ```
     """
     # Extract senses from each explorer using SSR
@@ -795,7 +1084,11 @@ def merge_with_ssr(
                 print(f"Warning: {name} doesn't have induce_senses, using simple extraction")
     
     # Create merger and run
-    merger = create_merger_from_explorers(explorers, verbose=verbose)
+    merger = create_merger_from_explorers(
+        explorers, 
+        clustering_method=clustering_method,
+        verbose=verbose
+    )
     return merger.merge_senses(
         word,
         sense_components=all_senses,
@@ -811,10 +1104,18 @@ def plot_merger_dendrogram(
     result: MergerResult,
     output_path: str = None,
     figsize: Tuple[int, int] = (12, 8),
-    show_threshold_lines: List[float] = None
+    show_threshold_lines: List[float] = None,
+    use_spectral_distances: bool = True
 ):
     """
     Create a dendrogram visualization of merger results.
+    
+    Args:
+        result: MergerResult from merge_senses()
+        output_path: Path to save figure (optional)
+        figsize: Figure size
+        show_threshold_lines: Threshold values to mark with vertical lines
+        use_spectral_distances: If True and spectral_info available, use spectral distances
     
     Requires matplotlib and scipy.
     """
@@ -822,9 +1123,27 @@ def plot_merger_dendrogram(
     from scipy.cluster.hierarchy import dendrogram, linkage
     from scipy.spatial.distance import squareform
     
-    # Convert similarity to distance matrix
-    dist_matrix = 1 - result.similarity_matrix
-    np.fill_diagonal(dist_matrix, 0)
+    # Decide which distance matrix to use
+    if use_spectral_distances and result.spectral_info is not None:
+        # Compute spectral distances
+        coords = result.spectral_info.spectral_coords
+        n = len(result.sense_components)
+        dist_matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(i + 1, n):
+                d = np.linalg.norm(coords[i] - coords[j])
+                dist_matrix[i, j] = d
+                dist_matrix[j, i] = d
+        # Normalize
+        max_dist = np.max(dist_matrix)
+        if max_dist > 0:
+            dist_matrix = dist_matrix / max_dist
+        title_suffix = " (spectral distances)"
+    else:
+        # Use similarity-based distances
+        dist_matrix = 1 - result.similarity_matrix
+        np.fill_diagonal(dist_matrix, 0)
+        title_suffix = ""
     
     # Linkage
     dist_condensed = squareform(dist_matrix)
@@ -864,13 +1183,19 @@ def plot_merger_dendrogram(
         for thresh in show_threshold_lines:
             ax1.axvline(x=thresh, color='gray', linestyle='--', alpha=0.7)
     
-    ax1.set_xlabel('Distance (1 - similarity)')
-    ax1.set_title(f'Sense Hierarchy: "{result.word}"')
+    ax1.set_xlabel('Distance')
+    ax1.set_title(f'Sense Hierarchy: "{result.word}"{title_suffix}')
     
     # Legend
     from matplotlib.patches import Patch
     legend_elements = [Patch(facecolor=color_map[s], label=s) for s in sources]
     ax1.legend(handles=legend_elements, loc='lower right')
+    
+    # Add spectral info if available
+    if result.spectral_info:
+        ax1.text(0.02, 0.98, f"Spectral k={result.spectral_info.suggested_k}",
+                transform=ax1.transAxes, fontsize=9, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     # Heatmap
     dendro_order = dendro['leaves']
@@ -899,6 +1224,80 @@ def plot_merger_dendrogram(
     return fig
 
 
+def plot_spectral_analysis(
+    result: MergerResult,
+    output_path: str = None,
+    figsize: Tuple[int, int] = (12, 5)
+):
+    """
+    Plot spectral analysis: eigenvalues, eigengaps, and spectral embedding.
+    
+    Args:
+        result: MergerResult with spectral_info
+        output_path: Path to save figure
+        figsize: Figure size
+    """
+    if result.spectral_info is None:
+        raise ValueError("No spectral info available. Use clustering_method='spectral_hierarchical'")
+    
+    import matplotlib.pyplot as plt
+    
+    info = result.spectral_info
+    
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    
+    # Eigenvalues
+    ax1 = axes[0]
+    ax1.plot(range(1, len(info.eigenvalues) + 1), info.eigenvalues, 'bo-')
+    ax1.axvline(x=info.suggested_k, color='r', linestyle='--', label=f'k={info.suggested_k}')
+    ax1.set_xlabel('Index')
+    ax1.set_ylabel('Eigenvalue')
+    ax1.set_title('Laplacian Eigenvalues')
+    ax1.legend()
+    
+    # Eigengaps
+    ax2 = axes[1]
+    ax2.bar(range(1, len(info.eigengaps) + 1), info.eigengaps, color='steelblue')
+    ax2.axvline(x=info.suggested_k - 0.5, color='r', linestyle='--')
+    ax2.set_xlabel('Gap Index')
+    ax2.set_ylabel('Eigengap')
+    ax2.set_title('Eigengaps (larger = cluster boundary)')
+    
+    # Spectral embedding (first 2 dimensions)
+    ax3 = axes[2]
+    coords = info.spectral_coords
+    
+    # Color by source
+    sources = list(set(s.source for s in result.sense_components))
+    palette = ['#2E86AB', '#E94F37', '#76B041', '#F5A623', '#9B59B6']
+    color_map = {s: palette[i % len(palette)] for i, s in enumerate(sources)}
+    
+    for i, sense in enumerate(result.sense_components):
+        c = color_map[sense.source]
+        if coords.shape[1] >= 2:
+            ax3.scatter(coords[i, 0], coords[i, 1], c=c, s=100, edgecolors='black')
+            ax3.annotate(sense.sense_id.split('_')[-1], (coords[i, 0], coords[i, 1]),
+                        fontsize=8, ha='center', va='bottom')
+        else:
+            ax3.scatter(coords[i, 0], 0, c=c, s=100, edgecolors='black')
+    
+    ax3.set_xlabel('Spectral dim 1')
+    ax3.set_ylabel('Spectral dim 2' if coords.shape[1] >= 2 else '')
+    ax3.set_title(f'Spectral Embedding: "{result.word}"')
+    
+    # Legend
+    from matplotlib.patches import Patch
+    legend_elements = [Patch(facecolor=color_map[s], label=s) for s in sources]
+    ax3.legend(handles=legend_elements, loc='best')
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    
+    return fig
+
+
 # =============================================================================
 # MODULE TEST
 # =============================================================================
@@ -906,12 +1305,14 @@ def plot_merger_dendrogram(
 if __name__ == "__main__":
     print("Embedding Merger Module for SenseExplorer")
     print("=" * 50)
+    print("\nClustering methods:")
+    print("  - 'hierarchical': Standard agglomerative")
+    print("  - 'spectral': Pure spectral with eigengap k-selection")
+    print("  - 'spectral_hierarchical': Hybrid (recommended)")
     print("\nUsage:")
     print("  from sense_explorer.merger import EmbeddingMerger")
-    print("  merger = EmbeddingMerger()")
+    print("  merger = EmbeddingMerger(clustering_method='spectral_hierarchical')")
     print("  merger.add_embedding('wiki', wiki_vectors)")
     print("  merger.add_embedding('twitter', twitter_vectors)")
     print("  result = merger.merge_senses('bank')")
-    print("\nOr with SenseExplorer integration:")
-    print("  from sense_explorer.merger import merge_with_ssr")
-    print("  result = merge_with_ssr({'wiki': se_wiki, 'twitter': se_twitter}, 'bank')")
+    print("  print(f'Spectral k={result.spectral_info.suggested_k}')")

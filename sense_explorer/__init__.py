@@ -5,6 +5,19 @@ SenseExplorer: From Sense Discovery to Sense Induction via Simulated Self-Repair
 A lightweight, training-free framework for exploring word sense structure
 in static embeddings using biologically-inspired self-repair.
 
+Package Structure:
+    sense_explorer (this package)
+        ├── Basic: Sense separation from single embeddings
+        │   ├── core.py          - SenseExplorer main class
+        │   ├── spectral.py      - Spectral clustering
+        │   ├── geometry.py      - Sense geometry analysis
+        │   ├── polarity.py      - Polarity classification
+        │   └── distillation.py  - IVA sense distillation
+        │
+        └── merger/              - Advanced: Cross-embedding merger
+            ├── embedding_merger.py        - Main merger
+            └── staged_embedding_merger.py - Memory-efficient staged merger
+
 Key insight: The self-repair algorithm is attractor-following, not 
 space-sampling. Anchor centroids define deterministic attractors—success
 depends on anchor quality, not the number of noisy copies (N). Even N=3
@@ -15,7 +28,7 @@ Six capabilities on the supervision continuum:
   - discover_senses():           Semi-supervised - user specifies k
   - separate_senses_wordnet():   WordNet-guided - lexicographic structure + geometry
   - induce_senses():             Weakly supervised - anchor-guided (88% accuracy)
-  - merge_with():                Cross-embedding - combine sense inventories (NEW)
+  - merge_with():                Cross-embedding - combine sense inventories (Advanced)
   - find_polarity():             Supervised - polarity classification (97% accuracy)
 
 Basic Usage:
@@ -32,8 +45,9 @@ Basic Usage:
     # Knowledge-guided induction (88% accuracy)
     >>> senses = se.induce_senses("bank")
     
-    # Cross-embedding merger (NEW in v0.9.3)
-    >>> se_twitter = SenseExplorer.from_glove("glove.twitter.100d.txt")
+    # Cross-embedding merger (Advanced - via subpackage)
+    >>> from sense_explorer.merger import EmbeddingMerger
+    >>> se_twitter = SenseExplorer.from_file("glove.twitter.100d.txt")
     >>> result = se.merge_with(se_twitter, "bank")
     >>> print(f"Convergent: {result.n_convergent}")
     
@@ -91,36 +105,23 @@ from .geometry import (
     plot_angle_summary,
 )
 
-# Embedding merger (NEW in v0.9.3)
+# Distillation module (v0.9.2)
 try:
-    from .merger import (
-        EmbeddingMerger,
-        SenseComponent,
-        MergerResult,
-        MergerBasis,
-        create_merger_from_explorers,
-        merge_with_ssr,
-        plot_merger_dendrogram,
+    from .distillation import (
+        IVADistiller,
+        DistillationResult,
+        distill_concept,
+        measure_set_coherence,
+        validate_distillation,
+        create_distiller_from_explorer,
     )
-    MERGER_AVAILABLE = True
+    DISTILLATION_AVAILABLE = True
 except ImportError:
-    MERGER_AVAILABLE = False
-
-# Staged merger for large embeddings (NEW in v0.9.3)
-try:
-    from .staged_merger import (
-        StagedMerger,
-        MergeStrategy,
-        MergePlan,
-        StagedMergeResult,
-        quick_staged_merge,
-    )
-    STAGED_MERGER_AVAILABLE = True
-except ImportError:
-    STAGED_MERGER_AVAILABLE = False
+    DISTILLATION_AVAILABLE = False
 
 __version__ = "0.9.3"
 __author__ = "Kow Kuroda & Claude"
+
 __all__ = [
     # Core
     'SenseExplorer',
@@ -156,23 +157,17 @@ __all__ = [
     'plot_angle_summary',
 ]
 
-# Add merger exports if available
-if MERGER_AVAILABLE:
+# Add distillation exports if available
+if DISTILLATION_AVAILABLE:
     __all__.extend([
-        'EmbeddingMerger',
-        'SenseComponent',
-        'MergerResult',
-        'MergerBasis',
-        'create_merger_from_explorers',
-        'merge_with_ssr',
-        'plot_merger_dendrogram',
+        'IVADistiller',
+        'DistillationResult',
+        'distill_concept',
+        'measure_set_coherence',
+        'validate_distillation',
+        'create_distiller_from_explorer',
     ])
 
-if STAGED_MERGER_AVAILABLE:
-    __all__.extend([
-        'StagedMerger',
-        'MergeStrategy',
-        'MergePlan',
-        'StagedMergeResult',
-        'quick_staged_merge',
-    ])
+# Note: Merger functionality is available via:
+#   from sense_explorer.merger import EmbeddingMerger, StagedMerger, ...
+# This keeps the basic namespace clean while making advanced features accessible.

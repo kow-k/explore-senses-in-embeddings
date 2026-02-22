@@ -98,6 +98,7 @@ except ImportError:
     WORDNET_AVAILABLE = False
 
 # Import embedding merger module (NEW in v0.9.3)
+# Located in sense_explorer.merger subpackage
 try:
     from .merger import (
         EmbeddingMerger,
@@ -109,6 +110,20 @@ try:
     MERGER_AVAILABLE = True
 except ImportError:
     MERGER_AVAILABLE = False
+
+# Import distillation module (v0.9.2)
+try:
+    from .distillation import (
+        IVADistiller,
+        DistillationResult,
+        distill_concept,
+        measure_set_coherence,
+        validate_distillation,
+        create_distiller_from_explorer,
+    )
+    DISTILLATION_AVAILABLE = True
+except ImportError:
+    DISTILLATION_AVAILABLE = False
 
 
 # =============================================================================
@@ -2632,6 +2647,248 @@ class SenseExplorer:
             ))
         
         return components
+    
+    # =========================================================================
+    # Sense Distillation via IVA (v0.9.2)
+    # =========================================================================
+    
+    def get_distiller(self) -> 'IVADistiller':
+        """
+        Get an IVA distiller using this explorer's embeddings.
+        
+        IVA (Iterative Vector Averaging) distills the shared semantic
+        component from a set of words — complementing SSR's sense separation.
+        
+        Returns:
+            IVADistiller instance
+        
+        Example:
+            >>> distiller = se.get_distiller()
+            >>> result = distiller.distill_constrained(['money', 'loan', 'account'])
+            >>> print(result.exemplars)
+        """
+        if not DISTILLATION_AVAILABLE:
+            raise ImportError(
+                "Distillation module not available. "
+                "Ensure distillation.py is in the sense_explorer package."
+            )
+        
+        return IVADistiller(
+            embeddings=self.embeddings,
+            verbose=self.verbose
+        )
+    
+    def distill_senses(
+        self,
+        word: str,
+        mode: str = 'constrained',
+        n_exemplars: int = 5,
+        n_senses: int = None
+    ) -> Dict[str, 'DistillationResult']:
+        """
+        Distill sense directions via IVA for a word's senses.
+        
+        This combines SSR sense separation with IVA distillation:
+        1. SSR extracts sense vectors and their anchors
+        2. IVA distills each anchor set to a purified direction
+        
+        Args:
+            word: Target word
+            mode: 'constrained' (recommended) or 'global'
+            n_exemplars: Number of exemplars per sense
+            n_senses: Number of senses (None = auto)
+        
+        Returns:
+            Dict mapping sense names to DistillationResults
+        
+        Example:
+            >>> results = se.distill_senses("bank")
+            >>> for sense, result in results.items():
+            ...     print(f"{sense}: coherence={result.coherence:.3f}")
+            financial: coherence=0.456
+            river: coherence=0.423
+        """
+        if not DISTILLATION_AVAILABLE:
+            raise ImportError(
+                "Distillation module not available. "
+                "Ensure distillation.py is in the sense_explorer package."
+            )
+        
+        # Get anchors for each sense
+        anchors = self.get_anchors(word)
+        
+        if not anchors:
+            # Induce senses first to populate anchors
+            _ = self.induce_senses(word, n_senses=n_senses)
+            anchors = self.get_anchors(word)
+        
+        if not anchors:
+            if self.verbose:
+                print(f"No anchors found for '{word}'")
+            return {}
+        
+        # Distill each sense's anchors
+        distiller = self.get_distiller()
+        return distiller.distill_multiple(anchors, mode=mode, n_exemplars=n_exemplars)
+    
+    def measure_anchor_coherence(self, word: str) -> Dict[str, float]:
+        """
+        Measure coherence of anchor sets for a word's senses.
+        
+        Use this to validate anchor quality before distillation.
+        Higher coherence → more meaningful distillation.
+        
+        Reference values:
+            - Random words: ~0.15
+            - Topically related: ~0.30-0.40
+            - Sense-coherent: ~0.45-0.55
+            - Near-synonyms: ~0.60-0.80
+        
+        Args:
+            word: Target word
+        
+        Returns:
+            Dict mapping sense names to coherence scores
+        
+        Example:
+            >>> coherences = se.measure_anchor_coherence("bank")
+            >>> print(coherences)
+            {'financial': 0.456, 'river': 0.423}
+        """
+        if not DISTILLATION_AVAILABLE:
+            raise ImportError("Distillation module not available.")
+        
+        anchors = self.get_anchors(word)
+        
+        if not anchors:
+            _ = self.induce_senses(word)
+            anchors = self.get_anchors(word)
+        
+        if not anchors:
+            if self.verbose:
+                print(f"No anchors found for '{word}'")
+            return {}
+        
+        return {
+            sense: measure_set_coherence(self.embeddings, words)
+            for sense, words in anchors.items()
+        }
+    
+    def distill_and_compare(
+        self,
+        word: str,
+        mode: str = 'constrained'
+    ) -> Dict[str, any]:
+        """
+        Distill senses and compare SSR vectors with IVA directions.
+        
+        This validates the relationship between SSR sense separation
+        and IVA concept distillation.
+        
+        Args:
+            word: Target word
+            mode: 'constrained' or 'global'
+        
+        Returns:
+            Dict with:
+                - ssr_senses: SSR sense vectors
+                - iva_results: IVA distillation results
+                - ssr_iva_angles: Angles between SSR and IVA per sense
+                - iva_inter_sense_angles: Angles between IVA directions
+        
+        Example:
+            >>> stats = se.distill_and_compare("bank")
+            >>> print(stats['ssr_iva_angles'])
+            {'financial': 12.3, 'river': 8.7}
+        """
+        if not DISTILLATION_AVAILABLE:
+            raise ImportError("Distillation module not available.")
+        
+        # Get SSR senses
+        ssr_senses = self.induce_senses(word)
+        
+        # Get IVA distillations
+        iva_results = self.distill_senses(word, mode=mode)
+        
+        # Compare SSR and IVA directions
+        ssr_iva_angles = {}
+        for sense_name in ssr_senses:
+            if sense_name in iva_results:
+                ssr_vec = ssr_senses[sense_name]
+                iva_vec = iva_results[sense_name].direction
+                
+                # Normalize
+                ssr_vec = ssr_vec / (np.linalg.norm(ssr_vec) + 1e-10)
+                iva_vec = iva_vec / (np.linalg.norm(iva_vec) + 1e-10)
+                
+                # Compute angle
+                cos_sim = np.clip(np.dot(ssr_vec, iva_vec), -1, 1)
+                angle = np.degrees(np.arccos(cos_sim))
+                ssr_iva_angles[sense_name] = angle
+        
+        # IVA inter-sense angles
+        distiller = self.get_distiller()
+        iva_inter_angles = distiller.compare_directions(iva_results)
+        
+        return {
+            'ssr_senses': ssr_senses,
+            'iva_results': iva_results,
+            'ssr_iva_angles': ssr_iva_angles,
+            'iva_inter_sense_angles': iva_inter_angles,
+            'mean_ssr_iva_angle': np.mean(list(ssr_iva_angles.values())) if ssr_iva_angles else 0,
+            'mean_iva_inter_angle': np.mean(list(iva_inter_angles.values())) if iva_inter_angles else 0,
+        }
+    
+    def validate_sense_distillation(
+        self,
+        words: List[str],
+        mode: str = 'constrained'
+    ) -> Dict[str, any]:
+        """
+        Run batch validation of sense distillation across multiple words.
+        
+        Args:
+            words: List of words to validate
+            mode: 'constrained' or 'global'
+        
+        Returns:
+            Dict with aggregate statistics
+        """
+        if not DISTILLATION_AVAILABLE:
+            raise ImportError("Distillation module not available.")
+        
+        all_coherences = []
+        all_ssr_iva_angles = []
+        all_inter_sense_angles = []
+        per_word = {}
+        
+        for word in words:
+            if word not in self.vocab:
+                continue
+            
+            try:
+                stats = self.distill_and_compare(word, mode=mode)
+                per_word[word] = stats
+                
+                # Collect coherences
+                for result in stats['iva_results'].values():
+                    all_coherences.append(result.coherence)
+                
+                # Collect angles
+                all_ssr_iva_angles.extend(stats['ssr_iva_angles'].values())
+                all_inter_sense_angles.extend(stats['iva_inter_sense_angles'].values())
+            except Exception as e:
+                if self.verbose:
+                    print(f"  Skipping '{word}': {e}")
+        
+        return {
+            'per_word': per_word,
+            'mean_coherence': np.mean(all_coherences) if all_coherences else 0,
+            'mean_ssr_iva_angle': np.mean(all_ssr_iva_angles) if all_ssr_iva_angles else 0,
+            'mean_inter_sense_angle': np.mean(all_inter_sense_angles) if all_inter_sense_angles else 0,
+            'n_words': len(per_word),
+            'n_senses': len(all_coherences),
+        }
     
     def __repr__(self) -> str:
         return f"SenseExplorer(vocab_size={self.vocab_size:,}, dim={self.dim}, cached_senses={len(self._sense_cache)})"
