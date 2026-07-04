@@ -111,7 +111,7 @@ For Large Embeddings (Staged Merger):
 
 Author: Kow Kuroda & Claude (Anthropic)
 License: MIT
-Version: 0.4.0
+Version: 0.6.0
 """
 
 from .embedding_merger import (

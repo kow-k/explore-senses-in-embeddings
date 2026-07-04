@@ -60,7 +60,7 @@ Basic Usage:
 
 Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
 License: MIT
-Version: 0.9.3
+Version: 0.9.4
 """
 
 from .core import (
@@ -119,7 +119,7 @@ try:
 except ImportError:
     DISTILLATION_AVAILABLE = False
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 __author__ = "Kow Kuroda & Claude"
 
 __all__ = [

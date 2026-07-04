@@ -567,10 +567,24 @@ class SenseExplorer:
                     except ValueError:
                         continue
         else:
-            # Text format
+            # Text format (handles both raw GloVe and word2vec-style headers)
+            first_line = True
             with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
                 for line in f:
                     parts = line.strip().split()
+                    # Detect word2vec-style header: exactly 2 integer tokens
+                    if first_line and len(parts) == 2:
+                        first_line = False
+                        try:
+                            int(parts[0])
+                            int(parts[1])
+                            if verbose:
+                                print(f"  Detected word2vec header: {parts[0]} words, "
+                                      f"{parts[1]} dimensions — skipping")
+                            continue
+                        except ValueError:
+                            pass  # Not a header; fall through to normal parsing
+                    first_line = False
                     if len(parts) < 2:
                         continue
                     word = parts[0]
