@@ -10,7 +10,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="sense-explorer",
-    version="0.9.4",
+    version="0.9.5",
     author="Kow Kuroda & Claude",
     author_email="kow.k@ks.kyorin-u.ac.jp",
     description="From sense discovery to sense induction via simulated self-repair",
@@ -47,6 +47,8 @@ setup(
     entry_points={
         "console_scripts": [
             "sense-explorer=sense_explorer.core:main",
+            "sense-explorer-extract-senses=sense_explorer.extract_senses_to_json:main",
+            "sense-explorer-extract-baseline=sense_explorer.extract_baseline_to_json:main",
         ],
     },
     keywords=[

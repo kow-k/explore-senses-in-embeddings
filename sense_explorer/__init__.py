@@ -14,9 +14,13 @@ Package Structure:
         │   ├── polarity.py      - Polarity classification
         │   └── distillation.py  - IVA sense distillation
         │
-        └── merger/              - Advanced: Cross-embedding merger
-            ├── embedding_merger.py        - Main merger
-            └── staged_embedding_merger.py - Memory-efficient staged merger
+        ├── merger/              - Advanced: Cross-embedding merger
+        │   ├── embedding_merger.py        - Main merger
+        │   └── staged_embedding_merger.py - Memory-efficient staged merger
+        │
+        └── Utilities: CLI export tools (installed as console scripts)
+            ├── extract_senses_to_json.py   - SSR sense vectors -> JSON
+            └── extract_baseline_to_json.py - Bare (no-SSR) vectors -> JSON, control condition
 
 Key insight: The self-repair algorithm is attractor-following, not 
 space-sampling. Anchor centroids define deterministic attractors—success
@@ -60,7 +64,7 @@ Basic Usage:
 
 Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
 License: MIT
-Version: 0.9.4
+Version: 0.9.5
 """
 
 from .core import (
@@ -119,7 +123,7 @@ try:
 except ImportError:
     DISTILLATION_AVAILABLE = False
 
-__version__ = "0.9.4"
+__version__ = "0.9.5"
 __author__ = "Kow Kuroda & Claude"
 
 __all__ = [

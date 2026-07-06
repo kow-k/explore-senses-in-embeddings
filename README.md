@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.9.4-green.svg)](https://github.com/kow-k/sense-explorer)
+[![Version](https://img.shields.io/badge/version-0.9.5-green.svg)](https://github.com/kow-k/sense-explorer)
 
 A lightweight, training-free framework for exploring word sense structure in static embeddings (GloVe, Word2Vec, FastText).
 
@@ -68,6 +68,9 @@ The same attractor-following mechanism operates across the entire supervision sp
 | **Embedding Merger** | `merge_with()` | Cross-embedding | Align senses across multiple embeddings |
 | **Polarity Classification** | `get_polarity()` | Supervised | Seed-guided polarity axis (97%) |
 | **Sense Geometry** | `localize_senses()` | Post-analysis | Geometric structure of separated senses |
+
+**What's new in v0.9.5**:
+- **JSON export utilities**: `extract_senses_to_json.py` and `extract_baseline_to_json.py` export sense vectors (SSR-separated or bare baseline) to JSON for downstream cross-word clustering experiments; installed as the `sense-explorer-extract-senses` and `sense-explorer-extract-baseline` console commands
 
 **What's new in v0.9.4**:
 - **Word2Vec-header auto-detection**: text-format embedding loading now detects and skips the word2vec-style header line (`<vocab_size> <dim>`), so word2vec text exports load without manual pre-processing
@@ -164,6 +167,9 @@ sense_explorer/
 ├── polarity.py              # Polarity classification
 ├── distillation.py          # IVA concept distillation
 │
+├── extract_senses_to_json.py    # CLI: export SSR sense vectors to JSON
+├── extract_baseline_to_json.py  # CLI: export bare (no-SSR) vectors to JSON
+│
 ├── merger/                  # Advanced: Cross-embedding merger (subpackage)
 │   ├── __init__.py          # Merger exports
 │   ├── embedding_merger.py  # Core merger with spectral-hierarchical clustering
@@ -227,6 +233,38 @@ python tests/run_all_tests.py --skip merger staged_merger
 | `test_distillation.py` | `distillation.py` | IVA distillation, global vs constrained, coherence |
 | `test_merger.py` | `embedding_merger.py` | Clustering methods, spectral analysis, thresholds |
 | `test_staged_merger.py` | `staged_embedding_merger.py` | Staging, affinity, memory management |
+
+## Command-Line Utilities
+
+Batch export sense vectors to JSON, e.g. for feeding a downstream clustering script.
+Both are installed as console commands (`pip install sense-explorer`) or runnable directly
+as `python -m sense_explorer.<module>`.
+
+### `sense-explorer-extract-senses`
+
+Runs SSR (or anchor-guided induction) over a word list and writes `{word: {sense_name: vector}}` JSON.
+
+```bash
+sense-explorer-extract-senses <embedding_path> <words_csv> <output_json> [mode]
+
+# mode: 'discover' (unsupervised, default) or 'induce' (anchor-guided)
+sense-explorer-extract-senses glove.6B.100d.txt polysemy_words_300.csv senses_100d.json discover
+```
+
+The input CSV needs a `word` (or `verb`) column and an `expected_senses` column; an optional
+`bnc_token` column can supply a separate vocabulary lookup key (e.g. `run_VERB`) when it differs
+from the display word.
+
+### `sense-explorer-extract-baseline`
+
+Writes the bare embedding for each word (no sense separation) in the same JSON schema, as a
+control condition for comparing against the SSR-treated output above.
+
+```bash
+sense-explorer-extract-baseline <embedding_path> <words_csv> <output_json>
+
+sense-explorer-extract-baseline glove.6B.100d.txt polysemy_words_300.csv senses_100d_baseline.json
+```
 
 ## Embedding Merger
 
@@ -475,6 +513,8 @@ from sense_explorer.distillation import (
 
 ## Version History
 
+- **v0.9.5**: JSON export utilities (`extract_senses_to_json.py`, `extract_baseline_to_json.py`) for cross-word clustering experiments
+- **v0.9.4**: Word2Vec-header auto-detection for text-format embedding loading
 - **v0.9.3**: Merger subpackage (`sense_explorer.merger`), spectral-hierarchical clustering, staged merger, comprehensive test suite, distillation module
 - **v0.9.2**: Sense distillation via IVA, constrained/global modes, anchor coherence measurement
 - **v0.9.1**: WordNet-guided sense separation, synset merging
