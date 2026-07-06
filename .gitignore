@@ -193,3 +193,4 @@ tester*.py
 *.tsv
 *.xlsx
 oil-and-gass-cbow-400.bin
+*.bin
