@@ -46,7 +46,7 @@ License: MIT
 Repository: https://github.com/kow-k/sense-explorer
 """
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 __author__ = "Kow Kuroda & Claude"
 
 import numpy as np

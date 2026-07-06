@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.9.3-green.svg)](https://github.com/kow-k/sense-explorer)
+[![Version](https://img.shields.io/badge/version-0.9.4-green.svg)](https://github.com/kow-k/sense-explorer)
 
 A lightweight, training-free framework for exploring word sense structure in static embeddings (GloVe, Word2Vec, FastText).
 
@@ -68,6 +68,9 @@ The same attractor-following mechanism operates across the entire supervision sp
 | **Embedding Merger** | `merge_with()` | Cross-embedding | Align senses across multiple embeddings |
 | **Polarity Classification** | `get_polarity()` | Supervised | Seed-guided polarity axis (97%) |
 | **Sense Geometry** | `localize_senses()` | Post-analysis | Geometric structure of separated senses |
+
+**What's new in v0.9.4**:
+- **Word2Vec-header auto-detection**: text-format embedding loading now detects and skips the word2vec-style header line (`<vocab_size> <dim>`), so word2vec text exports load without manual pre-processing
 
 **What's new in v0.9.3**:
 - **Embedding merger subpackage**: `sense_explorer.merger` provides clean separation between basic (sense separation) and advanced (cross-embedding merger) functionality

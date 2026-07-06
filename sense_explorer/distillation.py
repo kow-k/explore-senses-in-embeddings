@@ -56,7 +56,7 @@ Integration with SenseExplorer:
 
 Author: Kow Kuroda (Kyorin University) & Claude (Anthropic)
 License: MIT
-Version: 0.9.3
+Version: 0.9.4
 """
 
 import numpy as np
@@ -64,7 +64,7 @@ from numpy.linalg import norm
 from typing import Dict, List, Tuple, Optional, Union
 from dataclasses import dataclass, field
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 __author__ = "Kow Kuroda & Claude"
 
 __all__ = [
